@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react"
 import {
   Button,
   EntityRefField,
@@ -6,8 +6,10 @@ import {
   SectionHeader,
   SettingRow,
   Switch,
+  useEntityPickerSource,
 } from "@redbamboo/ui"
-import { get, post, put } from "./api"
+import { createMailAgentSource, type MailAgent } from "./agentSource"
+import { get, post, put, request } from "./api"
 
 const BASE = "/api/extensions/mail"
 
@@ -60,6 +62,17 @@ export function MailSettings() {
   const [pending, setPending] = useState(false)
   const [redirectUrl, setRedirectUrl] = useState("")
   const fileInput = useRef<HTMLInputElement>(null)
+  const [confirmUnbind, setConfirmUnbind] = useState(false)
+
+  // The shell's listing hides confidential agents; Mail's owner-only /agents includes
+  // the owner's. The field searches both and resolves through Mail first.
+  const shellSource = useEntityPickerSource()
+  const shellSourceRef = useRef(shellSource)
+  shellSourceRef.current = shellSource
+  const agentSource = useMemo(() => createMailAgentSource(
+    (signal) => request<{ items: MailAgent[] }>(`${BASE}/agents`, { signal }).then((value) => value.items),
+    () => shellSourceRef.current,
+  ), [])
 
   const reload = useCallback(async () => {
     try {
@@ -191,11 +204,29 @@ export function MailSettings() {
     <p className="mb-2 text-xs text-text-muted leading-relaxed">
       Only this agent can read mail (from your private discussions) and receive Mail context and LIVE notices.
     </p>
-    {/* The shell's entity picker lists what this session may read; the backend still validates the binding. */}
-    <EntityRefField className="mb-3 block w-full min-w-0" targetType="agent" title="Choose an Agent"
+    {/* Shell listing merged with Mail's /agents (confidential agents); the backend still validates the binding.
+        No one-click clear: unbinding revokes mail access, so it goes through the confirmation below. */}
+    <EntityRefField className="mb-2 block w-full min-w-0" targetType="agent" title="Choose an Agent"
       description="Mail will be readable only by this Agent, from your private discussions."
       placeholder="No agent bound" value={status?.agent_id} disabled={busy || !status}
-      onChange={(agentId) => void saveConfig({ agent_id: agentId ?? null })} />
+      source={agentSource} clearable={false}
+      onChange={(agentId) => { if (agentId) void saveConfig({ agent_id: agentId }) }} />
+    {status?.agent_id && !confirmUnbind &&
+      <div className="mb-3 flex justify-end">
+        <Button variant="ghost" size="sm" disabled={busy} onClick={() => setConfirmUnbind(true)}>Unbind agent</Button>
+      </div>}
+    {status?.agent_id && confirmUnbind &&
+      <div role="alertdialog" aria-label="Unbind agent" className="mb-3 rounded-md border border-overlay-6 bg-overlay-3 px-3 py-2">
+        <p className="mb-2 text-xs leading-relaxed text-text-muted">
+          Unbind this agent? It immediately loses read access to your mail, and Mail context and LIVE notices stop
+          until you bind an agent again.
+        </p>
+        <div className="flex flex-wrap justify-end gap-2">
+          <Button variant="outline" size="sm" disabled={busy} onClick={() => setConfirmUnbind(false)}>Cancel</Button>
+          <Button variant="destructive" size="sm" disabled={busy}
+            onClick={() => { setConfirmUnbind(false); void saveConfig({ agent_id: null }) }}>Unbind</Button>
+        </div>
+      </div>}
 
     <SectionHeader>4 · Connect</SectionHeader>
     <SettingActionRow label="Gmail account" hint="Opens Google's consent page in a new window. Keep this tab open until it reports Connected.">

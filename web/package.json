@@ -16,7 +16,8 @@
   "scripts": {
     "dev": "vite build --watch",
     "build:pkg": "vite build",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "node --test --experimental-strip-types tests/agent-source.test.ts"
   },
   "dependencies": {
     "@redbamboo/ui": "link:../../redbamboo-packages/packages/ui",
