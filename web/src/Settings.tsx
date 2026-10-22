@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react"
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react"
 import {
   Button,
   EntityRefField,
@@ -151,10 +151,10 @@ export function MailSettings() {
 
     <SectionHeader>Mail</SectionHeader>
     <div className="mail-status">
-      <strong>{statusLabel(status)}</strong>
+      <strong className={status?.status === "needs_reauth" ? "mail-error" : undefined}>{statusLabel(status)}</strong>
       {status?.email && <span>{status.email}{typeof status.inbox_unread === "number" ? ` · ${status.inbox_unread} unread in Inbox` : ""}</span>}
       <span>Last sync: {when(status?.last_sync_at)}{status?.token_health ? ` · token: ${status.token_health}` : ""}</span>
-      {status?.last_error && <span className="mail-warning">{status.last_error}</span>}
+      {status?.last_error && <span className="mail-error">{status.last_error}</span>}
     </div>
     <p className="mb-3 text-xs text-text-muted leading-relaxed">
       Mail gives you and your bound agent read-only access to one Gmail account. It requests only
@@ -174,41 +174,37 @@ export function MailSettings() {
         verification form, which a personal install does not need. Mail requests the scope when you connect.</li>
       <li><strong>Clients</strong>: Create client → Application type <strong>Desktop app</strong>, then download the JSON.</li>
     </ol>
-    <p className="mail-warning mb-3">
+    <p role="note" className="mb-3 rounded-md border border-overlay-6 bg-overlay-3 px-3 py-2 text-xs leading-relaxed text-text-muted">
       If the app stays in Testing mode, Google expires its tokens after 7 days and Mail will ask you to reconnect weekly.
       During consent, Google warns once that the app is unverified: choose Advanced → continue, since it is your own project.
     </p>
 
     <SectionHeader>2 · OAuth client</SectionHeader>
-    <SettingRow label="Desktop client JSON" hint={status?.client_configured ? "A client is configured. Upload again to replace it (disconnect first if it is a different client)." : "Upload the client_secret_….json file you downloaded. Web clients are rejected."}>
-      <div className="flex items-center gap-2">
-        <span className="text-xs text-text-muted">{status?.client_configured ? "Configured" : "Not configured"}</span>
-        <input ref={fileInput} type="file" accept="application/json,.json" className="hidden"
-          onChange={(event) => { const file = event.target.files?.[0]; if (file) void uploadClient(file) }} />
-        <Button variant="outline" size="sm" disabled={busy} onClick={() => fileInput.current?.click()}>Upload JSON</Button>
-      </div>
-    </SettingRow>
+    <SettingActionRow label="Desktop client JSON" hint={status?.client_configured ? "A client is configured. Upload again to replace it (disconnect first if it is a different client)." : "Upload the client_secret_….json file you downloaded. Web clients are rejected."}>
+      <span className="text-xs text-text-muted">{status?.client_configured ? "Configured" : "Not configured"}</span>
+      <input ref={fileInput} type="file" accept="application/json,.json" className="hidden"
+        onChange={(event) => { const file = event.target.files?.[0]; if (file) void uploadClient(file) }} />
+      <Button variant="outline" size="sm" disabled={busy} onClick={() => fileInput.current?.click()}>Upload JSON</Button>
+    </SettingActionRow>
 
     <SectionHeader>3 · Agent</SectionHeader>
     <p className="mb-2 text-xs text-text-muted leading-relaxed">
       Only this agent can read mail (from your private discussions) and receive Mail context and LIVE notices.
     </p>
     {/* The shell's entity picker lists what this session may read; the backend still validates the binding. */}
-    <EntityRefField className="mb-3" targetType="agent" title="Choose an Agent"
+    <EntityRefField className="mb-3 block w-full min-w-0" targetType="agent" title="Choose an Agent"
       description="Mail will be readable only by this Agent, from your private discussions."
       placeholder="No agent bound" value={status?.agent_id} disabled={busy || !status}
       onChange={(agentId) => void saveConfig({ agent_id: agentId ?? null })} />
 
     <SectionHeader>4 · Connect</SectionHeader>
-    <SettingRow label="Gmail account" hint="Opens Google's consent page in a new window. Keep this tab open until it reports Connected.">
-      <div className="flex items-center gap-2">
-        {status?.status !== "disconnected" && status &&
-          <Button variant="outline" size="sm" disabled={busy} onClick={disconnect}>Disconnect</Button>}
-        <Button size="sm" disabled={busy || !status?.client_configured} onClick={() => void connect()}>
-          {status?.status === "connected" ? "Reconnect" : "Connect"}
-        </Button>
-      </div>
-    </SettingRow>
+    <SettingActionRow label="Gmail account" hint="Opens Google's consent page in a new window. Keep this tab open until it reports Connected.">
+      {status?.status !== "disconnected" && status &&
+        <Button variant="outline" size="sm" disabled={busy} onClick={disconnect}>Disconnect</Button>}
+      <Button size="sm" disabled={busy || !status?.client_configured} onClick={() => void connect()}>
+        {status?.status === "connected" ? "Reconnect" : "Connect"}
+      </Button>
+    </SettingActionRow>
     {authUrl && <div className="mail-card">
       <p className="mail-muted mb-2">
         Waiting for Google... If the window did not open, <a href={authUrl} target="_blank" rel="noopener noreferrer" className="underline">open the consent page</a>.
@@ -218,7 +214,7 @@ export function MailSettings() {
         Finished consent on another device? Its browser ends on a page at <code>http://127.0.0.1:…</code> that fails to
         load. Copy that full address and paste it here:
       </p>
-      <div className="flex items-center gap-2">
+      <div className="flex flex-wrap items-center gap-2 [&>input]:min-w-0 [&>input]:flex-1 [&>input]:basis-48">
         <Input value={redirectUrl} placeholder="http://127.0.0.1:…/?state=…&code=…" onChange={(event) => setRedirectUrl(event.target.value)} />
         <Button variant="outline" size="sm" disabled={busy || !redirectUrl.trim()} onClick={() => void complete()}>Complete</Button>
       </div>
@@ -235,5 +231,21 @@ export function MailSettings() {
         <Switch checked={status?.live_excluded_categories.includes(category.id) === true} disabled={busy || !status || !status.live_approved}
           onCheckedChange={(value) => toggleCategory(category.id, value)} />
       </SettingRow>)}
+  </div>
+}
+
+/**
+ * A SettingRow for wide controls (several buttons). Same typography, spacing and slot as
+ * @redbamboo/ui SettingRow, but it measures its own container: label and controls sit
+ * side by side only from 28rem wide, otherwise the controls stack under the label and wrap,
+ * so nothing clips in the narrow Settings drawer.
+ */
+function SettingActionRow({ label, hint, children }: { label: string; hint?: string; children: ReactNode }) {
+  return <div data-slot="setting-row" className="@container/mail-row py-2.5">
+    <div className="flex flex-col gap-2 @md/mail-row:flex-row @md/mail-row:items-center @md/mail-row:justify-between @md/mail-row:gap-4">
+      <span className="min-w-0 text-sm text-text-muted">{label}</span>
+      <div className="flex min-w-0 flex-wrap items-center gap-2 @md/mail-row:shrink-0 @md/mail-row:justify-end">{children}</div>
+    </div>
+    {hint && <p className="text-xs text-muted-a60 mt-1 leading-relaxed">{hint}</p>}
   </div>
 }

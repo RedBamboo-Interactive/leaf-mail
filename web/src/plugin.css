@@ -46,9 +46,9 @@
   font-size: 0.7rem;
 }
 
-.mail-warning {
-  color: var(--color-accent-amber, var(--color-accent-red));
-  font-size: 0.75rem;
+/* Destructive colour is reserved for real error states (last_error, needs_reauth). */
+.mail-error {
+  color: var(--color-accent-red);
 }
 
 .mail-card select,
