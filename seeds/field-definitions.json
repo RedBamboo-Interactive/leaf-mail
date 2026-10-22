@@ -1,0 +1,21 @@
+[
+  { "parentType": "mail-config", "slug": "owner_user_id", "name": "Owner", "fieldType": "string", "sortOrder": 0, "description": "The RedLeaf user who configured Mail. Only this user and their bound agent can use it." },
+  { "parentType": "mail-config", "slug": "agent_id", "name": "Bound Agent", "fieldType": "string", "sortOrder": 1, "description": "Agent entity id that may read mail for the owner and receives Mail context and LIVE notices." },
+  { "parentType": "mail-config", "slug": "client_id", "name": "OAuth Client ID", "fieldType": "secret", "sortOrder": 2, "description": "Google Desktop app OAuth client id. Encrypted and never returned over HTTP." },
+  { "parentType": "mail-config", "slug": "client_secret", "name": "OAuth Client Secret", "fieldType": "secret", "sortOrder": 3, "description": "Google Desktop app OAuth client secret. Encrypted and never returned over HTTP." },
+  { "parentType": "mail-config", "slug": "live_enabled", "name": "LIVE New-Mail Notices", "fieldType": "boolean", "sortOrder": 4, "defaultValue": "true", "description": "Post a quoted sender + subject notice to the owner's confidential LIVE for new Inbox mail." },
+  { "parentType": "mail-config", "slug": "live_excluded_categories", "name": "LIVE Excluded Categories", "fieldType": "json", "sortOrder": 5, "description": "Gmail category labels that never produce LIVE notices. Default: promotions, social, forums." },
+
+  { "parentType": "mail-account", "slug": "email", "name": "Email", "fieldType": "string", "sortOrder": 0, "description": "Mailbox address reported by Gmail after consent." },
+  { "parentType": "mail-account", "slug": "status", "name": "Status", "fieldType": "select", "sortOrder": 1, "constraints": "{\"options\":[\"connected\",\"needs_reauth\",\"disconnected\"]}" },
+  { "parentType": "mail-account", "slug": "refresh_token", "name": "Refresh Token", "fieldType": "secret", "sortOrder": 2, "description": "Google OAuth refresh token (gmail.readonly). Encrypted, never returned over HTTP, never logged." },
+  { "parentType": "mail-account", "slug": "granted_scope", "name": "Granted Scope", "fieldType": "string", "sortOrder": 3 },
+  { "parentType": "mail-account", "slug": "history_id", "name": "History ID", "fieldType": "string", "sortOrder": 4, "description": "Gmail history cursor for incremental sync." },
+  { "parentType": "mail-account", "slug": "backfill_complete", "name": "Backfill Complete", "fieldType": "boolean", "sortOrder": 5 },
+  { "parentType": "mail-account", "slug": "token_health", "name": "Token Health", "fieldType": "string", "sortOrder": 6, "description": "ok, degraded, invalid_grant, scope_mismatch, revoked, ..." },
+  { "parentType": "mail-account", "slug": "last_sync_at", "name": "Last Sync", "fieldType": "datetime", "sortOrder": 7 },
+  { "parentType": "mail-account", "slug": "last_error", "name": "Last Error", "fieldType": "string", "sortOrder": 8, "description": "Human-readable; never contains token material or Google response bodies." },
+  { "parentType": "mail-account", "slug": "inbox_unread", "name": "Inbox Unread", "fieldType": "number", "sortOrder": 9 },
+  { "parentType": "mail-account", "slug": "connected_at", "name": "Connected At", "fieldType": "datetime", "sortOrder": 10 },
+  { "parentType": "mail-account", "slug": "health_epoch", "name": "Health Epoch", "fieldType": "number", "sortOrder": 11, "description": "Counts health transitions so each LIVE health notice has a distinct idempotency key." }
+]

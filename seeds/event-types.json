@@ -1,0 +1,13 @@
+[
+  {
+    "typeSlug": "event-type",
+    "slug": "event-type-mail",
+    "name": "Mail",
+    "data": {
+      "key": "mail",
+      "icon": "ph-bold ph-envelope-simple",
+      "color": "sky",
+      "description": "Mail LIVE invalidations (opaque nonce only; no mail content on the bus)"
+    }
+  }
+]

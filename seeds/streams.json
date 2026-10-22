@@ -1,0 +1,13 @@
+[
+  {
+    "typeSlug": "stream",
+    "slug": "mail:messages",
+    "name": "Mail Messages",
+    "data": {
+      "description": "Gmail message metadata only (id, threadId, from, to, subject, date, labelIds, snippet). Message bodies are never stored.",
+      "retention_days": 30,
+      "privacy": "confidential",
+      "search": { "enabled": false }
+    }
+  }
+]

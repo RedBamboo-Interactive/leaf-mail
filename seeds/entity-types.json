@@ -1,0 +1,26 @@
+[
+  {
+    "typeSlug": "entity-type",
+    "slug": "mail-config",
+    "name": "Mail Config",
+    "data": {
+      "icon": "ph-bold ph-sliders-horizontal",
+      "color": "sky",
+      "versioning": false,
+      "runtime_fields": ["client_id", "client_secret"],
+      "description": "Singleton Mail configuration: Google Desktop OAuth client (secret), owner, bound agent, and LIVE filters. Created at startup, never seeded."
+    }
+  },
+  {
+    "typeSlug": "entity-type",
+    "slug": "mail-account",
+    "name": "Mail Account",
+    "data": {
+      "icon": "ph-bold ph-envelope-simple",
+      "color": "sky",
+      "versioning": false,
+      "runtime_fields": ["email", "status", "refresh_token", "granted_scope", "history_id", "backfill_complete", "token_health", "last_sync_at", "last_error", "inbox_unread", "connected_at", "health_epoch"],
+      "description": "The connected Gmail account (read-only scope). Created at runtime on successful consent."
+    }
+  }
+]
