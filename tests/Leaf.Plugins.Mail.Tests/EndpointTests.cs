@@ -1,0 +1,172 @@
+using System.Net;
+using System.Net.Http.Json;
+using System.Security.Claims;
+using System.Text;
+using System.Text.Json.Nodes;
+using Leaf.Plugins.Mail;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.TestHost;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
+using Xunit;
+
+namespace Leaf.Plugins.Mail.Tests;
+
+/// <summary>End-to-end through the real route group and caller filter (no kernel, no network).</summary>
+public sealed class EndpointTests : IAsyncLifetime
+{
+    private readonly Harness _h = new();
+    private IHost? _host;
+    private HttpClient _client = null!;
+    private static readonly Dictionary<string, ClaimsPrincipal> Principals = new();
+
+    public async Task InitializeAsync()
+    {
+        await _h.ConfigureAsync();
+        _h.Entities.Add("discussion", "d1", new JsonObject
+        {
+            ["discussion_id"] = "disc-private-1", ["app"] = "nova", ["owner_id"] = Harness.Owner, ["agent"] = Harness.Agent,
+        });
+        _h.Entities.Add("agent", "nova", new JsonObject());
+        _host = await new HostBuilder().ConfigureWebHost(web => web.UseTestServer()
+            .ConfigureServices(services =>
+            {
+                services.AddRouting();
+                services.AddSingleton(_h.Store);
+                services.AddSingleton(_h.Service);
+                services.AddSingleton(new MailConsent(_h.Store, _h.OAuth, _h.Service, startListener: false));
+                services.AddSingleton(new MailPoller(_h.Service));
+            })
+            .Configure(app =>
+            {
+                app.Use(async (ctx, next) =>
+                {
+                    // Stand-in for host authentication: the test names a principal.
+                    var key = ctx.Request.Headers["X-Test-Principal"].ToString();
+                    ctx.User = Principals.TryGetValue(key, out var principal) ? principal : new ClaimsPrincipal(new ClaimsIdentity());
+                    await next();
+                });
+                app.UseRouting();
+                app.UseEndpoints(endpoints => MailEndpoints.Map(endpoints.MapGroup("/api/extensions/mail")));
+            })).StartAsync();
+        _client = _host.GetTestClient();
+        lock (Principals)
+        {
+            Principals["owner"] = CallerTests.User();
+            Principals["local"] = CallerTests.User(authType: "LocalDefault");
+            Principals["agent"] = CallerTests.Execution(CallerTests.PrivateNovaAgent());
+            Principals["discord"] = CallerTests.Execution(CallerTests.PrivateNovaAgent(extraContext:
+                new JsonObject { ["kind"] = "external-conversation", ["id"] = "discord:1:2" }));
+            Principals["other-agent"] = CallerTests.Execution(CallerTests.PrivateNovaAgent(agent: "44444444-4444-4444-4444-444444444444"));
+        }
+    }
+
+    public async Task DisposeAsync()
+    {
+        if (_host != null) await _host.StopAsync();
+        _host?.Dispose();
+    }
+
+    private Task<HttpResponseMessage> Send(HttpMethod method, string path, string principal, string? json = null)
+    {
+        var request = new HttpRequestMessage(method, "/api/extensions/mail" + path);
+        request.Headers.Add("X-Test-Principal", principal);
+        if (json != null) request.Content = new StringContent(json, Encoding.UTF8, "application/json");
+        return _client.SendAsync(request);
+    }
+
+    [Theory]
+    [InlineData("local", HttpStatusCode.Unauthorized)]
+    [InlineData("anonymous", HttpStatusCode.Unauthorized)]
+    [InlineData("discord", HttpStatusCode.Forbidden)]
+    [InlineData("other-agent", HttpStatusCode.Forbidden)]
+    [InlineData("owner", HttpStatusCode.OK)]
+    [InlineData("agent", HttpStatusCode.OK)]
+    public async Task Status_and_discovery_apply_the_caller_filter(string principal, HttpStatusCode expected)
+    {
+        Assert.Equal(expected, (await Send(HttpMethod.Get, "/status", principal)).StatusCode);
+        Assert.Equal(expected, (await Send(HttpMethod.Get, "/discover", principal)).StatusCode);
+        var response = await Send(HttpMethod.Get, "/search?q=subject:receipt", principal);
+        if (expected != HttpStatusCode.OK) Assert.Equal(expected, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Status_reports_connection_without_secrets()
+    {
+        var body = await (await Send(HttpMethod.Get, "/status", "owner")).Content.ReadAsStringAsync();
+        Assert.Contains("\"connected\":true", body);
+        Assert.Contains("user@example.com", body);
+        Assert.DoesNotContain("refresh-token-1", body);
+        Assert.DoesNotContain(Harness.ClientSecret, body);
+        Assert.Equal("no-store", (await Send(HttpMethod.Get, "/status", "owner")).Headers.CacheControl?.ToString());
+    }
+
+    [Theory]
+    [InlineData("POST", "/oauth/start", null)]
+    [InlineData("POST", "/disconnect", null)]
+    [InlineData("PUT", "/config", "{\"live_enabled\":false}")]
+    [InlineData("PUT", "/client", "{}")]
+    [InlineData("GET", "/agents", null)]
+    public async Task Settings_routes_reject_agent_executions(string method, string path, string? json)
+    {
+        var response = await Send(new HttpMethod(method), path, "agent", json);
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+        Assert.Contains("owner_user_required", await response.Content.ReadAsStringAsync());
+    }
+
+    [Fact]
+    public async Task Search_validates_max_and_query()
+    {
+        Assert.Equal(HttpStatusCode.BadRequest, (await Send(HttpMethod.Get, "/search?q=x&max=51", "owner")).StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, (await Send(HttpMethod.Get, "/search?q=x&max=0", "owner")).StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, (await Send(HttpMethod.Get, "/search", "owner")).StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, (await Send(HttpMethod.Get, "/messages/..%2Fprofile", "owner")).StatusCode);
+    }
+
+    [Fact]
+    public async Task Search_passes_gmail_syntax_through_and_returns_untrusted_metadata()
+    {
+        _h.TokenOk();
+        _h.Google.Json(HttpMethod.Get, Harness.Gmail + "/messages?q=", """{"messages":[{"id":"m1"}]}""");
+        _h.Batch(new() { ["m1"] = Harness.MessageJson("m1", "A <a@example.com>", "Receipt", "INBOX") });
+        var response = await Send(HttpMethod.Get, "/search?q=" + Uri.EscapeDataString("from:shop newer_than:1h") + "&max=5", "agent");
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var json = JsonNode.Parse(await response.Content.ReadAsStringAsync())!;
+        Assert.True(json["untrusted"]!.GetValue<bool>());
+        Assert.Equal("Receipt", json["items"]![0]!["subject"]!.GetValue<string>());
+        Assert.Contains(_h.Google.Requests, r => r.Url.Contains("q=from%3Ashop%20newer_than%3A1h&maxResults=5"));
+    }
+
+    [Fact]
+    public async Task Owner_can_bind_agent_and_filters_but_not_unknown_settings()
+    {
+        var ok = await Send(HttpMethod.Put, "/config", "owner",
+            $$"""{"live_excluded_categories":["CATEGORY_PROMOTIONS"],"live_enabled":true}""");
+        Assert.Equal(HttpStatusCode.OK, ok.StatusCode);
+        Assert.Equal(["CATEGORY_PROMOTIONS"], (await _h.Store.GetConfigAsync()).LiveExcludedCategories);
+        Assert.Equal(HttpStatusCode.BadRequest, (await Send(HttpMethod.Put, "/config", "owner", """{"owner_user_id":"x"}""")).StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, (await Send(HttpMethod.Put, "/config", "owner", """{"agent_id":"55555555-5555-5555-5555-555555555555"}""")).StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, (await Send(HttpMethod.Put, "/config", "owner", """{"live_excluded_categories":["INBOX"]}""")).StatusCode);
+    }
+
+    [Fact]
+    public async Task Uploading_a_web_client_is_rejected()
+    {
+        var response = await Send(HttpMethod.Put, "/client", "owner",
+            """{"web":{"client_id":"123456789012-abcdefghijklmnop0123456789abcdef.apps.googleusercontent.com","client_secret":"GOCSPX-test_secret_value"}}""");
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Contains("Desktop app", await response.Content.ReadAsStringAsync());
+    }
+
+    [Fact]
+    public async Task Invalid_grant_during_a_read_marks_needs_reauth_and_returns_409()
+    {
+        _h.Google.Json(HttpMethod.Post, "https://oauth2.googleapis.com/token", """{"error":"invalid_grant"}""", HttpStatusCode.BadRequest);
+        var response = await Send(HttpMethod.Get, "/messages/m1", "owner");
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+        Assert.Equal(MailStatus.NeedsReauth, (await _h.Store.GetAccountAsync())!.Status);
+        Assert.Single(_h.Live);
+    }
+}

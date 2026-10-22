@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+  </PropertyGroup>
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.13.0" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.5"><PrivateAssets>all</PrivateAssets></PackageReference>
+    <PackageReference Include="Microsoft.AspNetCore.TestHost" Version="9.0.19" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Leaf.Plugins.Mail\Leaf.Plugins.Mail.csproj" />
+  </ItemGroup>
+  <!-- The plugin references Leaf.Sdk with Private=false (the kernel supplies it); the test
+       host is not the kernel, so it references the same SDK input directly. -->
+  <PropertyGroup>
+    <LeafSdkProject Condition="'$(LeafSdkAssembly)' == '' And '$(LeafSdkProject)' == '' And Exists('..\..\..\redleaf\src\Leaf.Sdk\Leaf.Sdk.csproj')">..\..\..\redleaf\src\Leaf.Sdk\Leaf.Sdk.csproj</LeafSdkProject>
+  </PropertyGroup>
+  <ItemGroup Condition="'$(LeafSdkAssembly)' != ''">
+    <Reference Include="Leaf.Sdk"><HintPath>$(LeafSdkAssembly)</HintPath></Reference>
+  </ItemGroup>
+  <ItemGroup Condition="'$(LeafSdkAssembly)' == '' And '$(LeafSdkProject)' != ''">
+    <ProjectReference Include="$(LeafSdkProject)" />
+  </ItemGroup>
+</Project>
