@@ -4,9 +4,9 @@
     "slug": "mail:messages",
     "name": "Mail Messages",
     "data": {
-      "description": "Gmail message metadata only (id, threadId, from, to, subject, date, labelIds, snippet). Message bodies are never stored.",
+      "description": "Sync bookkeeping only: Gmail message id, thread id, label ids and internal date, one record per message, parented to the confidential mail-account entity. No sender, recipient, subject, snippet, or body is ever stored.",
       "retention_days": 30,
-      "privacy": "confidential",
+      "privacy": "ids-only",
       "search": { "enabled": false }
     }
   }

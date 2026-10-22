@@ -1,6 +1,6 @@
 [
-  { "parentType": "mail-config", "slug": "owner_user_id", "name": "Owner", "fieldType": "string", "sortOrder": 0, "description": "The RedLeaf user who configured Mail. Only this user and their bound agent can use it." },
-  { "parentType": "mail-config", "slug": "agent_id", "name": "Bound Agent", "fieldType": "string", "sortOrder": 1, "description": "Agent entity id that may read mail for the owner and receives Mail context and LIVE notices." },
+  { "parentType": "mail-config", "slug": "owner_user_id", "name": "Owner", "fieldType": "string", "sortOrder": 0, "description": "Mail's copy of the kernel owner_id. Changes only through Mail; an out-of-band edit is reverted." },
+  { "parentType": "mail-config", "slug": "agent_id", "name": "Bound Agent", "fieldType": "string", "sortOrder": 1, "description": "Mail's copy of the kernel owner_agent_id: the agent that may read mail for the owner. Changes only through Mail." },
   { "parentType": "mail-config", "slug": "client_id", "name": "OAuth Client ID", "fieldType": "secret", "sortOrder": 2, "description": "Google Desktop app OAuth client id. Encrypted and never returned over HTTP." },
   { "parentType": "mail-config", "slug": "client_secret", "name": "OAuth Client Secret", "fieldType": "secret", "sortOrder": 3, "description": "Google Desktop app OAuth client secret. Encrypted and never returned over HTTP." },
   { "parentType": "mail-config", "slug": "live_enabled", "name": "LIVE New-Mail Notices", "fieldType": "boolean", "sortOrder": 4, "defaultValue": "true", "description": "Post a quoted sender + subject notice to the owner's confidential LIVE for new Inbox mail." },

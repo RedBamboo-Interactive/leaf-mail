@@ -1,15 +1,34 @@
 using System.Text.Json.Nodes;
 using Leaf.Sdk;
 using Leaf.Sdk.Services;
+using Microsoft.Extensions.Logging;
 
 namespace Leaf.Plugins.Mail;
 
-/// <summary>Entity access for the <c>mail-config</c> singleton and the <c>mail-account</c>.</summary>
-public sealed class MailStore(IEntityStore entities)
+/// <summary>
+/// Entity access for the <c>mail-config</c> singleton and the <c>mail-account</c>.
+///
+/// Both entities are kernel-confidential (<c>confidential</c>, <c>owner_id</c>,
+/// <c>owner_agent_id</c>). The kernel hides them from entity lists and admits direct reads
+/// and mutations only from the explicit human owner or an owning-agent execution, so
+/// LocalDefault and other admins can neither read nor PATCH them. The kernel does not
+/// restrict what the owner or the owning agent writes, though, so Mail does not trust a
+/// stored binding blindly: authorization comes from the kernel fields, they must agree
+/// with Mail's own copies, and the binding Mail last established is pinned in memory. A
+/// change made outside Mail is reverted to the pin; with no pin (fresh process) an
+/// inconsistent or non-confidential binding fails closed.
+/// </summary>
+public sealed class MailStore(IEntityStore entities, ILogger<MailStore>? logger = null)
 {
+    private static readonly string[] BindingKeys = ["confidential", "owner_id", "owner_user_id", "owner_agent_id", "agent_id"];
     private readonly SemaphoreSlim _configGate = new(1, 1);
+    private readonly SemaphoreSlim _bindingGate = new(1, 1);
+    private MailPolicy? _pinned;
 
     public IEntityStore Entities => entities;
+
+    /// <summary>How many times a binding changed outside Mail was detected and reverted.</summary>
+    public int BindingRestoreCount { get; private set; }
 
     /// <summary>Created once at startup (never seeded: seeds re-upsert on every boot).</summary>
     public async Task<MailConfigSnapshot> EnsureConfigAsync(CancellationToken ct = default)
@@ -21,9 +40,11 @@ public sealed class MailStore(IEntityStore entities)
         {
             existing = await entities.GetBySlugAsync(MailData.ConfigType, MailData.ConfigSlug, ct);
             if (existing != null) return ConfigFrom(existing);
+            // Confidential from birth; with no owner yet the kernel admits nobody.
             var created = await entities.UpsertBySlugAsync(MailData.ConfigType, MailData.ConfigSlug, "Mail Config",
                 new JsonObject
                 {
+                    ["confidential"] = true,
                     ["live_enabled"] = true,
                     ["live_excluded_categories"] = new JsonArray(MailData.DefaultLiveExcludedCategories
                         .Select(c => (JsonNode)JsonValue.Create(c)).ToArray()),
@@ -35,11 +56,138 @@ public sealed class MailStore(IEntityStore entities)
 
     public Task<MailConfigSnapshot> GetConfigAsync(CancellationToken ct = default) => EnsureConfigAsync(ct);
 
+    /// <summary>Non-binding settings only (client, LIVE filters). Binding keys are rejected.</summary>
     public async Task<MailConfigSnapshot> PatchConfigAsync(JsonObject patch, CancellationToken ct = default)
     {
+        if (BindingKeys.Any(patch.ContainsKey))
+            throw new InvalidOperationException("Binding fields change only through the binding API");
         var config = await EnsureConfigAsync(ct);
         return ConfigFrom(await entities.PatchAsync(config.Entity.Id, patch, ct: ct));
     }
+
+    /// <summary>
+    /// The verified owner/agent binding used for every authorization decision. Reverts a
+    /// binding changed outside Mail to the pinned one; fails closed with no pin.
+    /// </summary>
+    public async Task<MailPolicy> GetPolicyAsync(CancellationToken ct = default)
+    {
+        var config = await EnsureConfigAsync(ct);
+        var pinned = _pinned;
+        if (pinned != null && config.BindingIntact && new MailPolicy(config.OwnerUserId, config.AgentId) == pinned)
+        {
+            await EnsureAccountBindingAsync(pinned, ct);
+            return pinned;
+        }
+
+        await _bindingGate.WaitAsync(ct);
+        try
+        {
+            pinned = _pinned;
+            config = await EnsureConfigAsync(ct);
+            var current = new MailPolicy(config.OwnerUserId, config.AgentId);
+            if (pinned == null)
+            {
+                if (!config.BindingIntact)
+                {
+                    logger?.LogError("Mail binding is inconsistent or not confidential; refusing all callers");
+                    throw new MailFault("mail_binding_untrusted", 409);
+                }
+                _pinned = pinned = current;
+            }
+            else if (!config.BindingIntact || current != pinned)
+            {
+                BindingRestoreCount++;
+                logger?.LogWarning("Mail binding was changed outside Mail; restoring the pinned owner and agent");
+                await WriteBindingAsync(config, pinned, ct);
+            }
+            await EnsureAccountBindingAsync(pinned, ct);
+            return pinned;
+        }
+        finally { _bindingGate.Release(); }
+    }
+
+    /// <summary>
+    /// Atomically claims an unowned Mail (compare-and-set on the config revision). Only an
+    /// admin may make the first claim; afterwards only the owner passes.
+    /// </summary>
+    public async Task<MailPolicy> ClaimOwnerAsync(string userId, bool isAdmin, CancellationToken ct = default)
+    {
+        var policy = await GetPolicyAsync(ct);
+        if (policy.OwnerUserId != null)
+            return SameGuid(policy.OwnerUserId, userId) ? policy : throw new MailFault("owner_required", 403);
+        if (!isAdmin) throw new MailFault("admin_required_for_first_claim", 403);
+
+        await _bindingGate.WaitAsync(ct);
+        try
+        {
+            for (var attempt = 0; attempt < 3 && _pinned?.OwnerUserId == null; attempt++)
+            {
+                var config = await EnsureConfigAsync(ct);
+                if (config.OwnerUserId != null) break;
+                var data = config.Entity.Data.DeepClone().AsObject();
+                data["confidential"] = true;
+                data["owner_id"] = userId;
+                data["owner_user_id"] = userId;
+                data["owner_agent_id"] = null;
+                data["agent_id"] = null;
+                if (await entities.CompareExchangeBySlugAsync(MailData.ConfigType, MailData.ConfigSlug,
+                        config.Entity.Name, data, config.Entity.UpdatedAt, ct) != null)
+                    _pinned = new MailPolicy(userId, null);
+            }
+            var owner = _pinned?.OwnerUserId;
+            if (owner == null) throw new MailFault("owner_claim_conflict", 409);
+            if (!SameGuid(owner, userId)) throw new MailFault("owner_required", 403);
+            await EnsureAccountBindingAsync(_pinned!, ct);
+            return _pinned!;
+        }
+        finally { _bindingGate.Release(); }
+    }
+
+    /// <summary>Binds (or, with null, unbinds) the agent. The caller must already be the owner.</summary>
+    public async Task<MailPolicy> SetAgentAsync(string? agentId, CancellationToken ct = default)
+    {
+        var policy = await GetPolicyAsync(ct);
+        if (policy.OwnerUserId == null) throw new MailFault("owner_required", 403);
+        await _bindingGate.WaitAsync(ct);
+        try
+        {
+            var next = policy with { AgentId = agentId };
+            await WriteBindingAsync(await EnsureConfigAsync(ct), next, ct);
+            _pinned = next;
+            await EnsureAccountBindingAsync(next, ct);
+            return next;
+        }
+        finally { _bindingGate.Release(); }
+    }
+
+    private Task WriteBindingAsync(MailConfigSnapshot config, MailPolicy binding, CancellationToken ct)
+        => entities.PatchAsync(config.Entity.Id, new JsonObject
+        {
+            ["confidential"] = true,
+            ["owner_id"] = binding.OwnerUserId,
+            ["owner_user_id"] = binding.OwnerUserId,
+            ["owner_agent_id"] = binding.AgentId,
+            ["agent_id"] = binding.AgentId,
+        }, ct: ct);
+
+    private async Task EnsureAccountBindingAsync(MailPolicy binding, CancellationToken ct)
+    {
+        var account = await entities.GetBySlugAsync(MailData.AccountType, MailData.AccountSlug, ct);
+        if (account == null) return;
+        var data = account.Data;
+        if (MailData.Boolean(data, "confidential")
+            && MailData.String(data, "owner_id") == binding.OwnerUserId
+            && MailData.String(data, "owner_agent_id") == binding.AgentId)
+            return;
+        await entities.PatchAsync(account.Id, AccountOwnership(binding), ct: ct);
+    }
+
+    private static JsonObject AccountOwnership(MailPolicy binding) => new()
+    {
+        ["confidential"] = true,
+        ["owner_id"] = binding.OwnerUserId,
+        ["owner_agent_id"] = binding.AgentId,
+    };
 
     public async Task<MailAccountSnapshot?> GetAccountAsync(CancellationToken ct = default)
     {
@@ -47,12 +195,16 @@ public sealed class MailStore(IEntityStore entities)
         return entity == null ? null : AccountFrom(entity);
     }
 
+    /// <summary>Creates or patches the account; it always carries the confidential owner/agent binding.</summary>
     public async Task<MailAccountSnapshot> UpsertAccountAsync(JsonObject patch, CancellationToken ct = default)
     {
+        var binding = await GetPolicyAsync(ct);
+        var data = patch.DeepClone().AsObject();
+        foreach (var (key, value) in AccountOwnership(binding)) data[key] = value?.DeepClone();
         var existing = await entities.GetBySlugAsync(MailData.AccountType, MailData.AccountSlug, ct);
         var entity = existing == null
-            ? await entities.UpsertBySlugAsync(MailData.AccountType, MailData.AccountSlug, "Gmail Account", patch, ct)
-            : await entities.PatchAsync(existing.Id, patch, ct: ct);
+            ? await entities.UpsertBySlugAsync(MailData.AccountType, MailData.AccountSlug, "Gmail Account", data, ct)
+            : await entities.PatchAsync(existing.Id, data, ct: ct);
         return AccountFrom(entity);
     }
 
@@ -88,14 +240,22 @@ public sealed class MailStore(IEntityStore entities)
         var excluded = data["live_excluded_categories"] is JsonArray
             ? MailData.StringList(data, "live_excluded_categories")
             : MailData.DefaultLiveExcludedCategories;
+        var owner = MailData.String(data, "owner_id");
+        var agent = MailData.String(data, "owner_agent_id");
+        var intact = MailData.Boolean(data, "confidential")
+            && owner == MailData.String(data, "owner_user_id")
+            && agent == MailData.String(data, "agent_id")
+            && (owner == null || Guid.TryParse(owner, out _))
+            && (agent == null || Guid.TryParse(agent, out _));
         return new MailConfigSnapshot(
             entity,
-            MailData.String(data, "owner_user_id"),
-            MailData.String(data, "agent_id"),
+            owner,
+            agent,
             MailData.String(data, "client_id"),
             MailData.String(data, "client_secret"),
             MailData.Boolean(data, "live_enabled", true),
-            excluded.ToHashSet(StringComparer.Ordinal));
+            excluded.ToHashSet(StringComparer.Ordinal),
+            intact);
     }
 
     internal static MailAccountSnapshot AccountFrom(LeafEntity entity)
@@ -193,9 +353,10 @@ public sealed class MailTokenCache(GoogleOAuthClient oauth, MailStore store, Tim
         finally { _gate.Release(); }
     }
 
-    public void Invalidate()
+    /// <summary>Drops the cached access token (async: never blocks a thread on the refresh gate).</summary>
+    public async Task InvalidateAsync(CancellationToken ct = default)
     {
-        _gate.Wait();
+        await _gate.WaitAsync(ct);
         try { InvalidateLocked(); }
         finally { _gate.Release(); }
     }

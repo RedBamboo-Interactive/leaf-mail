@@ -8,8 +8,12 @@ namespace Leaf.Plugins.Mail;
 public enum SyncResult { Idle, Synced, Backfilled, Resynced, NeedsReauth }
 
 /// <summary>
-/// Account lifecycle and synchronization. Only metadata is stored (record stream
-/// <c>mail:messages</c>); bodies are fetched live per request and never persisted.
+/// Account lifecycle and synchronization. Kernel records (stream <c>mail:messages</c>)
+/// hold only message ids, thread ids, label ids and internal dates, parented to the
+/// confidential account entity: kernel stream reads are not bound by Mail's caller
+/// policy, so no sender, recipient, subject, snippet, or body is ever written there.
+/// Content is read live from Gmail; the LIVE notice for just-detected mail is formatted
+/// from in-memory metadata only.
 /// </summary>
 public sealed class MailService(
     MailStore store,
@@ -25,13 +29,16 @@ public sealed class MailService(
     public const int BackfillMax = 2000;
     public const int HistoryMax = 1000;
     private readonly TimeProvider _clock = clock ?? TimeProvider.System;
-    private readonly SemaphoreSlim _syncGate = new(1, 1);
+    // Serializes sync, connect, and disconnect so a running sync can never write the
+    // previous mailbox's cursor after a reconnect.
+    private readonly SemaphoreSlim _accountGate = new(1, 1);
 
     public MailStore Store => store;
 
     public async Task<JsonObject> StatusAsync(CancellationToken ct)
     {
         var config = await store.GetConfigAsync(ct);
+        var policy = await store.GetPolicyAsync(ct);
         var account = await store.GetAccountAsync(ct);
         return new JsonObject
         {
@@ -45,8 +52,8 @@ public sealed class MailService(
             ["inbox_unread"] = account?.InboxUnread,
             ["backfill_complete"] = account?.BackfillComplete == true,
             ["client_configured"] = config.ClientConfigured,
-            ["owner_configured"] = config.OwnerUserId != null,
-            ["agent_id"] = config.AgentId,
+            ["owner_configured"] = policy.OwnerUserId != null,
+            ["agent_id"] = policy.AgentId,
             ["live_enabled"] = config.LiveEnabled,
             ["live_excluded_categories"] = new JsonArray(config.LiveExcludedCategories.Order(StringComparer.Ordinal)
                 .Select(c => (JsonNode)JsonValue.Create(c)).ToArray()),
@@ -74,43 +81,53 @@ public sealed class MailService(
                 "Google returned no refresh token. Remove the app's access at myaccount.google.com and connect again.");
         }
 
-        var config = await store.GetConfigAsync(ct);
-        if (config.OwnerUserId != null && !string.Equals(config.OwnerUserId, ownerUserId, StringComparison.OrdinalIgnoreCase))
+        var policy = await store.GetPolicyAsync(ct);
+        if (policy.OwnerUserId == null || !string.Equals(policy.OwnerUserId, ownerUserId, StringComparison.OrdinalIgnoreCase))
             throw new MailFault("owner_required", 403);
-        var previous = await store.GetAccountAsync(ct);
-        var wasNeedsReauth = previous?.Status == MailStatus.NeedsReauth;
 
-        await tokens.PrimeAsync(grant, ct);
-        GmailProfile? profile = null;
-        string? profileError = null;
-        var account = await store.UpsertAccountAsync(new JsonObject
+        MailAccountSnapshot account;
+        bool wasNeedsReauth;
+        await _accountGate.WaitAsync(ct);
+        try
         {
-            ["status"] = MailStatus.Connected,
-            ["refresh_token"] = grant.RefreshToken,
-            ["granted_scope"] = MailData.ReadonlyScope,
-            ["token_health"] = "ok",
-            ["last_error"] = null,
-            ["connected_at"] = _clock.GetUtcNow().ToString("O"),
-        }, ct);
-        try { profile = await gmail.GetProfileAsync(ct); }
-        catch (GmailApiException ex) { profileError = ex.Message; }
+            var previous = await store.GetAccountAsync(ct);
+            wasNeedsReauth = previous?.Status == MailStatus.NeedsReauth;
 
-        var patch = new JsonObject();
-        var sameMailbox = profile != null && previous?.Email != null
-            && string.Equals(previous.Email, profile.EmailAddress, StringComparison.OrdinalIgnoreCase);
-        if (profile != null) patch["email"] = profile.EmailAddress;
-        else patch["last_error"] = profileError;
-        if (!sameMailbox)
-        {
-            // A different or unverified mailbox (or the first connect) starts from a fresh backfill.
-            patch["history_id"] = null;
-            patch["backfill_complete"] = false;
+            await tokens.PrimeAsync(grant, ct);
+            GmailProfile? profile = null;
+            string? profileError = null;
+            account = await store.UpsertAccountAsync(new JsonObject
+            {
+                ["status"] = MailStatus.Connected,
+                ["refresh_token"] = grant.RefreshToken,
+                ["granted_scope"] = MailData.ReadonlyScope,
+                ["token_health"] = "ok",
+                ["last_error"] = null,
+                ["connected_at"] = _clock.GetUtcNow().ToString("O"),
+            }, ct);
+            try { profile = await gmail.GetProfileAsync(ct); }
+            catch (GmailApiException ex) { profileError = ex.Message; }
+
+            var patch = new JsonObject();
+            var sameMailbox = profile != null && previous?.Email != null
+                && string.Equals(previous.Email, profile.EmailAddress, StringComparison.OrdinalIgnoreCase);
+            if (profile != null) patch["email"] = profile.EmailAddress;
+            else patch["last_error"] = profileError;
+            if (!sameMailbox)
+            {
+                // A different or unverified mailbox (or the first connect) starts from a
+                // fresh backfill, and the previous mailbox's records go with it.
+                patch["history_id"] = null;
+                patch["backfill_complete"] = false;
+                if (previous != null) await DeleteRecordsAsync(account, policy.OwnerUserId, ct);
+            }
+            account = await store.PatchAccountAsync(account, patch, ct);
+
+            // Replace, then revoke, an older refresh token so reconnects do not accumulate grants.
+            if (previous?.RefreshToken is { } old && old != grant.RefreshToken)
+                await oauth.RevokeAsync(old, ct);
         }
-        account = await store.PatchAccountAsync(account, patch, ct);
-
-        // Replace, then revoke, an older refresh token so reconnects do not accumulate grants.
-        if (previous?.RefreshToken is { } old && old != grant.RefreshToken)
-            await oauth.RevokeAsync(old, ct);
+        finally { _accountGate.Release(); }
 
         if (wasNeedsReauth)
             await EmitHealthAsync(account, MailStatus.Connected, ct);
@@ -118,29 +135,47 @@ public sealed class MailService(
         return await StatusAsync(ct);
     }
 
-    /// <summary>Revokes the grant at Google, clears the refresh token, and marks the account disconnected.</summary>
+    /// <summary>
+    /// Revokes the grant at Google, clears the refresh token and sync cursor, deletes the
+    /// stored message records, and marks the account disconnected.
+    /// </summary>
     public async Task<JsonObject> DisconnectAsync(CancellationToken ct)
     {
-        var account = await store.GetAccountAsync(ct);
         var revoked = false;
-        if (account?.RefreshToken is { } refresh)
-            revoked = await oauth.RevokeAsync(refresh, ct);
-        tokens.Invalidate();
-        if (account != null)
-            await store.PatchAccountAsync(account, new JsonObject
+        await _accountGate.WaitAsync(ct);
+        try
+        {
+            var account = await store.GetAccountAsync(ct);
+            if (account?.RefreshToken is { } refresh)
+                revoked = await oauth.RevokeAsync(refresh, ct);
+            await tokens.InvalidateAsync(ct);
+            if (account != null)
             {
-                ["status"] = MailStatus.Disconnected,
-                ["refresh_token"] = null,
-                ["history_id"] = null,
-                ["backfill_complete"] = false,
-                ["token_health"] = revoked ? "revoked" : "revoke_unconfirmed",
-                ["inbox_unread"] = null,
-                ["last_error"] = revoked ? null
-                    : "Google did not confirm revocation; the local token was deleted. Remove access at myaccount.google.com if needed.",
-            }, ct);
+                await store.PatchAccountAsync(account, new JsonObject
+                {
+                    ["status"] = MailStatus.Disconnected,
+                    ["refresh_token"] = null,
+                    ["history_id"] = null,
+                    ["backfill_complete"] = false,
+                    ["token_health"] = revoked ? "revoked" : "revoke_unconfirmed",
+                    ["inbox_unread"] = null,
+                    ["last_error"] = revoked ? null
+                        : "Google did not confirm revocation; the local token was deleted. Remove access at myaccount.google.com if needed.",
+                }, ct);
+                await DeleteRecordsAsync(account, (await store.GetPolicyAsync(ct)).OwnerUserId, ct);
+            }
+        }
+        finally { _accountGate.Release(); }
         var status = await StatusAsync(ct);
         status["revoked"] = revoked;
         return status;
+    }
+
+    private async Task DeleteRecordsAsync(MailAccountSnapshot account, string? ownerUserId, CancellationToken ct)
+    {
+        await records.DeleteAsync(MailData.MessagesStream, new RecordDeleteScope { EntityId = account.Entity.Id }, ct);
+        if (ownerUserId != null)
+            await records.DeleteAsync(MailData.MessagesStream, new RecordDeleteScope { UserId = ownerUserId }, ct);
     }
 
     /// <summary>
@@ -149,7 +184,7 @@ public sealed class MailService(
     /// </summary>
     public async Task MarkNeedsReauthAsync(string code, string message, CancellationToken ct)
     {
-        tokens.Invalidate();
+        await tokens.InvalidateAsync(ct);
         var account = await store.GetAccountAsync(ct);
         if (account == null || account.Status == MailStatus.NeedsReauth) return;
         if (account.Status == MailStatus.Disconnected) return;
@@ -172,9 +207,9 @@ public sealed class MailService(
 
     private async Task PublishAsync(LiveNotice notice, CancellationToken ct)
     {
-        var config = await store.GetConfigAsync(ct);
-        if (config.OwnerUserId == null || config.AgentId == null) return;
-        try { await live.PublishAsync(notice, config.OwnerUserId, config.AgentId, ct); }
+        var policy = await store.GetPolicyAsync(ct);
+        if (policy.OwnerUserId == null || policy.AgentId == null) return;
+        try { await live.PublishAsync(notice, policy.OwnerUserId, policy.AgentId, ct); }
         catch (Exception ex) when (ex is not OperationCanceledException)
         { logger?.LogWarning("Mail LIVE notice could not be published: {Type}", ex.GetType().Name); }
     }
@@ -185,20 +220,22 @@ public sealed class MailService(
     /// </summary>
     public async Task<SyncResult> SyncOnceAsync(CancellationToken ct)
     {
-        await _syncGate.WaitAsync(ct);
+        await _accountGate.WaitAsync(ct);
         try
         {
             var account = await store.GetAccountAsync(ct);
             if (account is not { IsConnected: true }) return SyncResult.Idle;
             var config = await store.GetConfigAsync(ct);
-            if (!config.ClientConfigured || config.OwnerUserId == null) return SyncResult.Idle;
+            var policy = await store.GetPolicyAsync(ct);
+            if (!config.ClientConfigured || policy.OwnerUserId == null) return SyncResult.Idle;
+            var generation = Generation(account);
 
             SyncResult result;
             var patch = new JsonObject();
             if (account.HistoryId == null || !account.BackfillComplete)
             {
                 var profile = await gmail.GetProfileAsync(ct);
-                await BackfillAsync(config.OwnerUserId, ct);
+                await BackfillAsync(account, policy.OwnerUserId, ct);
                 patch["email"] = profile.EmailAddress;
                 patch["history_id"] = profile.HistoryId;
                 patch["backfill_complete"] = true;
@@ -214,13 +251,13 @@ public sealed class MailService(
                 {
                     // History expired (404) or too large to replay: resync 14 days, no LIVE.
                     var profile = await gmail.GetProfileAsync(ct);
-                    await BackfillAsync(config.OwnerUserId, ct);
+                    await BackfillAsync(account, policy.OwnerUserId, ct);
                     patch["history_id"] = profile.HistoryId;
                     result = SyncResult.Resynced;
                 }
                 else
                 {
-                    var stored = await StoreAsync(page.AddedMessageIds, config.OwnerUserId, ct);
+                    var stored = await StoreAsync(page.AddedMessageIds, account, policy.OwnerUserId, ct);
                     if (config.LiveEnabled)
                         foreach (var notice in MailLiveFormatter.Plan(stored, config.LiveExcludedCategories, backfill: false))
                             await PublishAsync(notice, ct);
@@ -234,8 +271,10 @@ public sealed class MailService(
             patch["last_sync_at"] = _clock.GetUtcNow().ToString("O");
             patch["last_error"] = null;
             patch["token_health"] = "ok";
+            // Belt and braces besides the gate: never write a cursor across a reconnect.
             account = await store.GetAccountAsync(ct);
-            if (account is { IsConnected: true }) await store.PatchAccountAsync(account, patch, ct);
+            if (account is { IsConnected: true } && Generation(account) == generation)
+                await store.PatchAccountAsync(account, patch, ct);
             return result;
         }
         catch (MailReauthRequiredException ex)
@@ -247,8 +286,11 @@ public sealed class MailService(
         {
             return SyncResult.Idle;
         }
-        finally { _syncGate.Release(); }
+        finally { _accountGate.Release(); }
     }
+
+    private static string Generation(MailAccountSnapshot account)
+        => MailData.String(account.Entity.Data, "connected_at") + "|" + account.Email;
 
     /// <summary>Records a sync failure that is safe to show (our own text, no response bodies).</summary>
     public async Task RecordErrorAsync(string message, CancellationToken ct)
@@ -258,14 +300,18 @@ public sealed class MailService(
             await store.PatchAccountAsync(account, new JsonObject { ["last_error"] = message, ["token_health"] = "degraded" }, ct);
     }
 
-    private async Task BackfillAsync(string ownerUserId, CancellationToken ct)
+    private async Task BackfillAsync(MailAccountSnapshot account, string ownerUserId, CancellationToken ct)
     {
         var ids = await gmail.ListMessageIdsAsync($"newer_than:{BackfillDays}d", BackfillMax, ct);
-        await StoreAsync(ids, ownerUserId, ct);
+        await StoreAsync(ids, account, ownerUserId, ct);
     }
 
-    /// <summary>Appends metadata once per message id; returns only the newly stored ones.</summary>
-    private async Task<IReadOnlyList<MailMetadata>> StoreAsync(IReadOnlyList<string> ids, string ownerUserId, CancellationToken ct)
+    /// <summary>
+    /// Appends an id-only record once per message id, parented to the confidential account;
+    /// returns the full metadata of the newly stored ones, in memory only, for LIVE.
+    /// </summary>
+    private async Task<IReadOnlyList<MailMetadata>> StoreAsync(
+        IReadOnlyList<string> ids, MailAccountSnapshot account, string ownerUserId, CancellationToken ct)
     {
         if (ids.Count == 0) return [];
         var metadata = await gmail.GetMetadataBatchAsync(ids, ct);
@@ -273,7 +319,8 @@ public sealed class MailService(
         foreach (var message in metadata)
         {
             if (message.LabelIds.Contains("DRAFT", StringComparer.Ordinal)) continue;
-            if (await records.AppendOnceAsync(MailData.MessagesStream, message.Id, message.ToJson(), userId: ownerUserId, ct: ct))
+            if (await records.AppendOnceAsync(MailData.MessagesStream, message.Id, message.ToRecordJson(),
+                    entityId: account.Entity.Id, userId: ownerUserId, ct: ct))
                 stored.Add(message);
         }
         return stored;
@@ -303,7 +350,7 @@ public sealed class MailService(
     {
         await RequireConnectedAsync(ct);
         using var doc = await gmail.GetMessageAsync(id, "full", ct);
-        var result = MessageJson(doc.RootElement);
+        var result = await MessageJsonAsync(doc.RootElement, ct);
         result["untrusted"] = true;
         result["note"] = UntrustedNote;
         return result;
@@ -318,6 +365,8 @@ public sealed class MailService(
         var messages = doc.RootElement.TryGetProperty("messages", out var m) && m.ValueKind == JsonValueKind.Array
             ? m.EnumerateArray().ToArray() : [];
         var shown = messages.Skip(Math.Max(0, messages.Length - ThreadMessageCap)).ToArray();
+        var items = new JsonArray();
+        foreach (var message in shown) items.Add(await MessageJsonAsync(message, ct));
         return new JsonObject
         {
             ["untrusted"] = true,
@@ -325,14 +374,17 @@ public sealed class MailService(
             ["threadId"] = id,
             ["messageCount"] = messages.Length,
             ["omittedOlderMessages"] = messages.Length - shown.Length,
-            ["messages"] = new JsonArray(shown.Select(message => (JsonNode)MessageJson(message)).ToArray()),
+            ["messages"] = items,
         };
     }
 
-    internal static JsonObject MessageJson(JsonElement message)
+    /// <summary>Largest externalized body part Mail will download (it is then capped like any body).</summary>
+    public const long ExternalBodyMaxBytes = 2 * 1024 * 1024;
+
+    private async Task<JsonObject> MessageJsonAsync(JsonElement message, CancellationToken ct)
     {
         var metadata = MailMessageParser.Metadata(message);
-        var body = MailMessageParser.Body(message);
+        var body = await BodyAsync(metadata.Id, message, ct);
         return new JsonObject
         {
             ["metadata"] = metadata.ToJson(),
@@ -346,6 +398,26 @@ public sealed class MailService(
                 ["text"] = l.Text,
             }).ToArray()),
         };
+    }
+
+    /// <summary>
+    /// Gmail may externalize a large body part: <c>body.data</c> is absent and
+    /// <c>body.attachmentId</c> refers to <c>messages.attachments.get</c>. Such a text part
+    /// without a filename is a body, not an attachment, so it is fetched (up to
+    /// <see cref="ExternalBodyMaxBytes"/>) and sanitized under the same caps.
+    /// </summary>
+    private async Task<SanitizedBody> BodyAsync(string messageId, JsonElement message, CancellationToken ct)
+    {
+        var part = MailMessageParser.BodyPart(message);
+        if (part is { Data: null, AttachmentId: { } attachmentId })
+        {
+            if (part.Size > ExternalBodyMaxBytes || !GmailClient.IsValidId(messageId))
+                return MailMessageParser.Unavailable(part.MimeType + " (too large)");
+            using var external = await gmail.GetAttachmentAsync(messageId, attachmentId, ct);
+            var data = external.RootElement.TryGetProperty("data", out var d) ? d.GetString() : null;
+            part = part with { Data = data };
+        }
+        return MailMessageParser.Body(part);
     }
 
     private async Task RequireConnectedAsync(CancellationToken ct)

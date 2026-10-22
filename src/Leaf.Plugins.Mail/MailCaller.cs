@@ -34,6 +34,9 @@ public delegate Task<bool> DiscussionOwnershipCheck(string discussionId, string 
 /// </summary>
 public sealed record MailCaller(MailCallerKind Kind, string UserId, string? AgentId, string? ExecutionId)
 {
+    /// <summary>Host-issued "admin" role on a plain user session (required for the first owner claim).</summary>
+    public bool IsAdmin { get; init; }
+
     public const string NovaAppId = "nova";
     public const string MailAppId = "mail";
     public const string NovaDiscussionRoutePrefix = "/api/apps/nova/discussions/";
@@ -63,9 +66,9 @@ public sealed record MailCaller(MailCallerKind Kind, string UserId, string? Agen
         var use = principal.FindFirstValue("token_use");
         if (use is null)
         {
-            if (policy.OwnerUserId is null) return new(MailCallerKind.OwnerUser, subject!, null, null);
-            if (!SameId(subject, policy.OwnerUserId)) throw new MailFault("owner_required", 403);
-            return new(MailCallerKind.OwnerUser, subject!, null, null);
+            if (policy.OwnerUserId is not null && !SameId(subject, policy.OwnerUserId))
+                throw new MailFault("owner_required", 403);
+            return new(MailCallerKind.OwnerUser, subject!, null, null) { IsAdmin = Roles(principal).Contains("admin") };
         }
         if (use != "execution") throw new MailFault("execution_identity_invalid", 401);
 
@@ -115,6 +118,18 @@ public sealed record MailCaller(MailCallerKind Kind, string UserId, string? Agen
     public void RequireOwnerUser()
     {
         if (Kind != MailCallerKind.OwnerUser) throw new MailFault("owner_user_required", 403);
+    }
+
+    /// <summary>Roles as the host issues them: one JSON-array claim or repeated claims.</summary>
+    internal static IReadOnlyList<string> Roles(ClaimsPrincipal principal)
+    {
+        var values = principal.FindAll("roles").Select(c => c.Value).ToArray();
+        if (values.Length == 1 && values[0].StartsWith('['))
+        {
+            try { return JsonSerializer.Deserialize<string[]>(values[0]) ?? []; }
+            catch (JsonException) { return []; }
+        }
+        return values;
     }
 
     private static bool SameId(string? a, string? b)

@@ -25,7 +25,7 @@ public sealed class SyncTests
     }
 
     [Fact]
-    public async Task New_inbox_mail_is_stored_as_metadata_and_projected_to_live()
+    public async Task New_inbox_mail_is_recorded_by_id_only_and_projected_to_live()
     {
         var h = new Harness();
         await h.ConfigureAsync();
@@ -40,9 +40,10 @@ public sealed class SyncTests
         Assert.Equal(SyncResult.Synced, await h.Service.SyncOnceAsync(default));
 
         Assert.Equal(2, h.Records.Once.Count);
+        // Kernel records carry ids only; the LIVE notice below comes from memory.
         var record = h.Records.Once["messages/m1"];
-        Assert.Equal("Your login link", record["subject"]!.GetValue<string>());
-        Assert.Null(record["body"]);
+        Assert.Equal(["id", "threadId", "labelIds", "internalDate"], record.Select(p => p.Key).ToArray());
+        Assert.DoesNotContain("login", record.ToJsonString(), StringComparison.OrdinalIgnoreCase);
         var live = Assert.Single(h.Live);
         Assert.Contains("> From: Example Sender\n> Subject: Your login link", live.Content);
         Assert.Equal("mail:new:m1", live.IdempotencyKey);

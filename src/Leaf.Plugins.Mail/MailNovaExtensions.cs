@@ -25,8 +25,10 @@ public sealed class MailNovaExtensions(IPluginExtensions extensions, MailStore s
 
     public async Task<PluginContextFragment?> ContextAsync(PluginContextRequest request, CancellationToken ct)
     {
-        var config = await store.GetConfigAsync(ct);
-        if (!SameId(request.UserId, config.OwnerUserId) || !SameId(request.AgentId, config.AgentId)) return null;
+        MailPolicy policy;
+        try { policy = await store.GetPolicyAsync(ct); }
+        catch (MailFault) { return null; }
+        if (!SameId(request.UserId, policy.OwnerUserId) || !SameId(request.AgentId, policy.AgentId)) return null;
         var account = await store.GetAccountAsync(ct);
         if (account == null || account.Status == MailStatus.Disconnected) return null;
         var content = Render(account);

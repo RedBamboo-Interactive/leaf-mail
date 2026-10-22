@@ -18,7 +18,7 @@ public sealed class GmailApiException(HttpStatusCode status, string message) : E
 public interface IMailAccessTokens
 {
     Task<string> GetAccessTokenAsync(CancellationToken ct);
-    void Invalidate();
+    Task InvalidateAsync(CancellationToken ct = default);
 }
 
 /// <summary>Retry/backoff policy, injectable so tests do not sleep.</summary>
@@ -132,6 +132,16 @@ public sealed class GmailClient(HttpClient http, GoogleEndpoints endpoints, IMai
         if (!IsValidId(id)) throw new ArgumentException("Invalid message id");
         var suffix = format == "metadata" ? "?format=metadata&" + MetadataHeaders : "?format=full";
         return GetJsonAsync($"/messages/{id}{suffix}", ct);
+    }
+
+    private static readonly Regex AttachmentIdShape = new("^[A-Za-z0-9_-]{1,2048}$", RegexOptions.Compiled);
+
+    /// <summary>users.messages.attachments.get: the content of an externalized part (MessagePartBody).</summary>
+    public Task<JsonDocument> GetAttachmentAsync(string messageId, string attachmentId, CancellationToken ct)
+    {
+        if (!IsValidId(messageId) || !AttachmentIdShape.IsMatch(attachmentId))
+            throw new ArgumentException("Invalid message or attachment id");
+        return GetJsonAsync($"/messages/{messageId}/attachments/{attachmentId}", ct);
     }
 
     public Task<JsonDocument> GetThreadAsync(string id, CancellationToken ct)
@@ -288,7 +298,7 @@ public sealed class GmailClient(HttpClient http, GoogleEndpoints endpoints, IMai
             if (status == HttpStatusCode.Unauthorized && !refreshed)
             {
                 refreshed = true;
-                tokens.Invalidate();
+                await tokens.InvalidateAsync(ct);
                 continue;
             }
             if (((int)status == 429 || (int)status >= 500) && attempt + 1 < MailBackoff.MaxAttempts)

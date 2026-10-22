@@ -36,8 +36,8 @@ internal static class MailDiscovery
             {
                 ["slug"] = "mail:messages",
                 ["retentionDays"] = 30,
-                ["privacy"] = "confidential",
-                ["content"] = "metadata only: id, threadId, from, to, subject, date, labelIds, snippet; never bodies",
+                ["privacy"] = "ids-only; records are parented to the confidential mail-account entity",
+                ["content"] = "id, threadId, labelIds, internalDate only; no sender, recipient, subject, snippet, or body",
             },
         },
         ["events"] = new JsonArray

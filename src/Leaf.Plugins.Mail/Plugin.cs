@@ -31,7 +31,8 @@ public sealed class MailPlugin : ILeafPlugin
             AllowAutoRedirect = false,
             PooledConnectionLifetime = TimeSpan.FromMinutes(10),
         }) { Timeout = TimeSpan.FromSeconds(30) });
-        services.AddSingleton(sp => new MailStore(sp.GetRequiredKeyedService<IEntityStore>(PluginId)));
+        services.AddSingleton(sp => new MailStore(
+            sp.GetRequiredKeyedService<IEntityStore>(PluginId), sp.GetService<ILogger<MailStore>>()));
         services.AddSingleton(sp => new GoogleOAuthClient(
             sp.GetRequiredKeyedService<HttpClient>(PluginId), sp.GetRequiredService<GoogleEndpoints>()));
         services.AddSingleton(sp => new MailTokenCache(
@@ -71,7 +72,11 @@ public sealed class MailPlugin : ILeafPlugin
     /// </summary>
     public async Task OnStartupAsync(IPluginHost host, CancellationToken ct)
     {
-        await host.GetRequiredService<MailStore>().EnsureConfigAsync(ct);
+        var store = host.GetRequiredService<MailStore>();
+        await store.EnsureConfigAsync(ct);
+        // Pin the stored owner/agent binding now, so later out-of-band edits are reverted.
+        try { await store.GetPolicyAsync(ct); }
+        catch (MailFault) { /* inconsistent binding: every caller is refused until repaired */ }
         host.GetRequiredService<MailNovaExtensions>().Start();
         var poller = host.GetRequiredService<MailPoller>();
         host.GetRequiredService<MailConsent>().Connected += poller.Wake;

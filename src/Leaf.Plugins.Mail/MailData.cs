@@ -83,6 +83,12 @@ internal static class MailEvents
     public const string LivePending = "mail.live.pending";
 }
 
+/// <summary>
+/// <see cref="OwnerUserId"/> and <see cref="AgentId"/> come from the kernel confidentiality
+/// fields (<c>owner_id</c>, <c>owner_agent_id</c>). <see cref="BindingIntact"/> is false when
+/// the entity is not confidential or those fields disagree with Mail's own copies
+/// (<c>owner_user_id</c>, <c>agent_id</c>), i.e. something other than Mail rewrote them.
+/// </summary>
 public sealed record MailConfigSnapshot(
     LeafEntity Entity,
     string? OwnerUserId,
@@ -90,7 +96,8 @@ public sealed record MailConfigSnapshot(
     string? ClientId,
     string? ClientSecret,
     bool LiveEnabled,
-    IReadOnlySet<string> LiveExcludedCategories)
+    IReadOnlySet<string> LiveExcludedCategories,
+    bool BindingIntact = true)
 {
     public bool ClientConfigured => ClientId != null && ClientSecret != null;
 }

@@ -36,19 +36,46 @@ internal sealed class MemoryEntities : IEntityStore
 
     public Task<LeafEntity> UpsertBySlugAsync(string typeSlug, string slug, string name, JsonObject? data = null, CancellationToken ct = default)
     {
+        if (FailWrite?.Invoke(typeSlug, data ?? []) is { } failure) throw failure;
         var existing = _items.Values.FirstOrDefault(e => e.TypeSlug == typeSlug && e.Slug == slug);
         var entity = new LeafEntity(existing?.Id ?? Guid.NewGuid(), typeSlug, slug, name,
-            data?.DeepClone() as JsonObject ?? [], existing?.CreatedAt ?? DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, null);
+            data?.DeepClone() as JsonObject ?? [], existing?.CreatedAt ?? DateTimeOffset.UtcNow, Next(existing?.UpdatedAt), null);
         return Task.FromResult(Put(entity));
     }
 
     public Task<LeafEntity> PatchAsync(Guid id, JsonObject dataPatch, string? name = null, CancellationToken ct = default)
     {
         var existing = _items[id];
+        if (FailWrite?.Invoke(existing.TypeSlug, dataPatch) is { } failure) throw failure;
         var data = existing.Data.DeepClone().AsObject();
         foreach (var (key, value) in dataPatch) data[key] = value?.DeepClone();
-        return Task.FromResult(Put(existing with { Data = data, Name = name ?? existing.Name, UpdatedAt = DateTimeOffset.UtcNow }));
+        return Task.FromResult(Put(existing with { Data = data, Name = name ?? existing.Name, UpdatedAt = Next(existing.UpdatedAt) }));
     }
+
+    public int CompareExchangeCount;
+
+    public Task<LeafEntity?> CompareExchangeBySlugAsync(string typeSlug, string slug, string name,
+        JsonObject data, DateTimeOffset? expectedUpdatedAt, CancellationToken ct = default)
+    {
+        lock (_items)
+        {
+            var existing = _items.Values.FirstOrDefault(e => e.TypeSlug == typeSlug && e.Slug == slug);
+            if (existing?.UpdatedAt != expectedUpdatedAt) return Task.FromResult<LeafEntity?>(null);
+            CompareExchangeCount++;
+            var entity = new LeafEntity(existing?.Id ?? Guid.NewGuid(), typeSlug, slug, name, data.DeepClone().AsObject(),
+                existing?.CreatedAt ?? DateTimeOffset.UtcNow, Next(existing?.UpdatedAt), null);
+            return Task.FromResult<LeafEntity?>(Put(entity));
+        }
+    }
+
+    // Strictly increasing revisions, like the kernel's UpdatedAt.
+    private static DateTimeOffset Next(DateTimeOffset? previous)
+    {
+        var now = DateTimeOffset.UtcNow;
+        return previous is { } p && now <= p ? p.AddTicks(1) : now;
+    }
+
+    public Func<string, JsonObject, Exception?>? FailWrite;
 
     public Task<LeafEntity> ReplaceDataAsync(Guid id, JsonObject data, string? name = null, CancellationToken ct = default)
         => Task.FromResult(Put(_items[id] with { Data = data.DeepClone().AsObject() }));
@@ -74,13 +101,33 @@ internal sealed class MemoryEntities : IEntityStore
 internal sealed class MemoryRecords : IRecordStreams
 {
     public readonly ConcurrentDictionary<string, JsonObject> Once = new();
+    public readonly ConcurrentDictionary<string, (Guid? EntityId, string? UserId)> Scope = new();
 
     public Task AppendAsync(string stream, JsonObject data, Guid? entityId = null, string? userId = null, CancellationToken ct = default)
         => Task.CompletedTask;
 
     public Task<bool> AppendOnceAsync(string stream, string operationId, JsonObject data,
         Guid? entityId = null, string? userId = null, CancellationToken ct = default)
-        => Task.FromResult(Once.TryAdd(stream + "/" + operationId, data.DeepClone().AsObject()));
+    {
+        var key = stream + "/" + operationId;
+        if (!Once.TryAdd(key, data.DeepClone().AsObject())) return Task.FromResult(false);
+        Scope[key] = (entityId, userId);
+        return Task.FromResult(true);
+    }
+
+    public Task<int> DeleteAsync(string stream, RecordDeleteScope scope, CancellationToken ct = default)
+    {
+        if (scope.EntityId == null && scope.UserId == null && scope.Until == null) throw new ArgumentException("scope required");
+        var removed = 0;
+        foreach (var (key, owner) in Scope.ToArray())
+        {
+            if (!key.StartsWith(stream + "/", StringComparison.Ordinal)) continue;
+            if (scope.EntityId != null && owner.EntityId != scope.EntityId) continue;
+            if (scope.UserId != null && owner.UserId != scope.UserId) continue;
+            if (Once.TryRemove(key, out _)) { Scope.TryRemove(key, out _); removed++; }
+        }
+        return Task.FromResult(removed);
+    }
 
     public Task<IReadOnlyList<LeafRecord>> QueryAsync(string stream, RecordQuery? query = null, CancellationToken ct = default)
         => Task.FromResult<IReadOnlyList<LeafRecord>>([]);
@@ -181,10 +228,10 @@ internal sealed class Harness
     public async Task ConfigureAsync(bool connected = true, string? historyId = "1000", bool backfilled = true)
     {
         await Store.EnsureConfigAsync();
+        await Store.ClaimOwnerAsync(Owner, isAdmin: true);
+        await Store.SetAgentAsync(Agent);
         await Store.PatchConfigAsync(new JsonObject
         {
-            ["owner_user_id"] = Owner,
-            ["agent_id"] = Agent,
             ["client_id"] = ClientId,
             ["client_secret"] = ClientSecret,
         });

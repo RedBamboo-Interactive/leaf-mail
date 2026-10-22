@@ -36,7 +36,7 @@ public sealed class MailSettingsProvider(MailStore store) : IPluginSettingsProvi
                     {
                         ["clientConfigured"] = config.ClientConfigured,
                         ["connection"] = account?.Status ?? MailStatus.Disconnected,
-                        ["agentBound"] = config.AgentId != null,
+                        ["agentBound"] = config.AgentId != null && config.BindingIntact,
                     },
                     ["endpoints"] = new JsonObject
                     {

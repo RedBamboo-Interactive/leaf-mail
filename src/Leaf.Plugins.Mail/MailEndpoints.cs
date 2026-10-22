@@ -30,9 +30,8 @@ internal static class MailEndpoints
             try
             {
                 var store = http.RequestServices.GetRequiredService<MailStore>();
-                var config = await store.GetConfigAsync(http.RequestAborted);
-                http.Items[CallerKey] = await MailCaller.FromAsync(http.User,
-                    new MailPolicy(config.OwnerUserId, config.AgentId),
+                var policy = await store.GetPolicyAsync(http.RequestAborted);
+                http.Items[CallerKey] = await MailCaller.FromAsync(http.User, policy,
                     store.IsOwnedNovaDiscussionAsync, http.RequestAborted);
                 return await next(ctx);
             }
@@ -108,8 +107,10 @@ internal static class MailEndpoints
             var caller = OwnerUser(c);
             var body = await ReadJsonAsync(c);
             var patch = await ValidateConfigAsync(body, caller, store, c.RequestAborted);
-            await ClaimOwnerAsync(store, caller, patch, c.RequestAborted);
-            await store.PatchConfigAsync(patch, c.RequestAborted);
+            await store.ClaimOwnerAsync(caller.UserId, caller.IsAdmin, c.RequestAborted);
+            if (patch.Remove("agent_id", out var agent))
+                await store.SetAgentAsync(agent?.GetValue<string>(), c.RequestAborted);
+            if (patch.Count > 0) await store.PatchConfigAsync(patch, c.RequestAborted);
             poller.Wake();
             return Results.Ok(await service.StatusAsync(c.RequestAborted));
         });
@@ -127,9 +128,8 @@ internal static class MailEndpoints
             var current = await store.GetConfigAsync(c.RequestAborted);
             if ((await store.GetAccountAsync(c.RequestAborted))?.RefreshToken != null && current.ClientId != client.ClientId)
                 throw new MailFault("disconnect_first", 409);
-            var patch = new JsonObject { ["client_id"] = client.ClientId, ["client_secret"] = client.ClientSecret };
-            await ClaimOwnerAsync(store, caller, patch, c.RequestAborted);
-            await store.PatchConfigAsync(patch, c.RequestAborted);
+            await store.ClaimOwnerAsync(caller.UserId, caller.IsAdmin, c.RequestAborted);
+            await store.PatchConfigAsync(new JsonObject { ["client_id"] = client.ClientId, ["client_secret"] = client.ClientSecret }, c.RequestAborted);
             poller.Wake();
             return Results.Ok(await service.StatusAsync(c.RequestAborted));
         });
@@ -146,9 +146,7 @@ internal static class MailEndpoints
         group.MapPost("/oauth/start", async (HttpContext c, MailStore store, MailConsent consent) =>
         {
             var caller = OwnerUser(c);
-            var claim = new JsonObject();
-            await ClaimOwnerAsync(store, caller, claim, c.RequestAborted);
-            if (claim.Count > 0) await store.PatchConfigAsync(claim, c.RequestAborted);
+            await store.ClaimOwnerAsync(caller.UserId, caller.IsAdmin, c.RequestAborted);
             return Results.Ok(await consent.StartAsync(caller.UserId, c.RequestAborted));
         });
 
@@ -175,15 +173,6 @@ internal static class MailEndpoints
         var caller = (MailCaller)c.Items[CallerKey]!;
         caller.RequireOwnerUser();
         return caller;
-    }
-
-    /// <summary>The first owner session that configures Mail becomes its owner; later sessions must match.</summary>
-    private static async Task ClaimOwnerAsync(MailStore store, MailCaller caller, JsonObject patch, CancellationToken ct)
-    {
-        var config = await store.GetConfigAsync(ct);
-        if (config.OwnerUserId == null) patch["owner_user_id"] = caller.UserId;
-        else if (!string.Equals(config.OwnerUserId, caller.UserId, StringComparison.OrdinalIgnoreCase))
-            throw new MailFault("owner_required", 403);
     }
 
     private static async Task<JsonObject> ValidateConfigAsync(JsonObject body, MailCaller caller, MailStore store, CancellationToken ct)
