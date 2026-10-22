@@ -8,11 +8,13 @@ using Microsoft.Extensions.Logging;
 namespace Leaf.Plugins.Mail;
 
 /// <summary>
-/// One OAuth consent attempt at a time. A loopback <see cref="HttpListener"/> on
-/// 127.0.0.1:&lt;random free port&gt; exists only while an attempt is pending (at most
-/// ten minutes). The redirect is accepted only with the exact pending state, verified in
-/// constant time; the attempt is single-use. The same verification guards the
-/// paste-the-redirect-URL fallback for consent completed on another device.
+/// One OAuth consent attempt at a time. The redirect is received by a plain socket bound
+/// to <see cref="IPAddress.Loopback"/> on an OS-assigned port (no http.sys, so no URL ACL
+/// and no Host-header matching on other interfaces). It exists only while an attempt is
+/// pending (at most ten minutes) and speaks just enough HTTP for one GET. If the socket
+/// cannot be opened, the attempt still exists in paste-only mode. The redirect is
+/// accepted only with the exact pending state, verified in constant time; the attempt is
+/// single-use. The same verification guards the paste-the-redirect-URL fallback.
 /// </summary>
 public sealed class MailConsent(
     MailStore store,
@@ -20,9 +22,12 @@ public sealed class MailConsent(
     MailService service,
     ILogger<MailConsent>? logger = null,
     TimeProvider? clock = null,
-    bool startListener = true) : IDisposable
+    bool startListener = true,
+    Func<TcpListener>? createListener = null) : IDisposable
 {
     public static readonly TimeSpan AttemptLifetime = TimeSpan.FromMinutes(10);
+    private static readonly TimeSpan RequestReadTimeout = TimeSpan.FromSeconds(5);
+    private const int MaxRequestHeadBytes = 8 * 1024;
     private readonly TimeProvider _clock = clock ?? TimeProvider.System;
     private readonly object _gate = new();
     private Attempt? _attempt;
@@ -31,8 +36,13 @@ public sealed class MailConsent(
     public event Action? Connected;
 
     private sealed class Attempt(string ownerUserId, DesktopClient client, string state, string verifier,
-        string redirectUri, int port, DateTimeOffset expiresAt) : IDisposable
+        string redirectUri, int port, DateTimeOffset expiresAt, TcpListener? listener)
     {
+        // The source is cancelled, never disposed, and its token is captured once, so
+        // late readers can never hit ObjectDisposedException.
+        private readonly CancellationTokenSource _lifetime = new();
+        private int _used;
+
         public string OwnerUserId { get; } = ownerUserId;
         public DesktopClient Client { get; } = client;
         public string State { get; } = state;
@@ -40,16 +50,15 @@ public sealed class MailConsent(
         public string RedirectUri { get; } = redirectUri;
         public int Port { get; } = port;
         public DateTimeOffset ExpiresAt { get; } = expiresAt;
-        public HttpListener? Listener { get; set; }
-        public CancellationTokenSource Lifetime { get; } = new();
-        private int _used;
+        public TcpListener? Listener { get; } = listener;
+        public CancellationToken LifetimeToken => _lifetime.Token; // safe: _lifetime is never disposed
         public bool TryClaim() => Interlocked.Exchange(ref _used, 1) == 0;
         public bool Used => Volatile.Read(ref _used) == 1;
-        public void Dispose()
+
+        public void Close()
         {
-            try { Lifetime.Cancel(); } catch (ObjectDisposedException) { }
-            try { Listener?.Close(); } catch (ObjectDisposedException) { }
-            Lifetime.Dispose();
+            try { _lifetime.Cancel(); } catch (ObjectDisposedException) { }
+            try { Listener?.Stop(); } catch (SocketException) { } catch (ObjectDisposedException) { }
         }
     }
 
@@ -61,29 +70,45 @@ public sealed class MailConsent(
         if (!config.ClientConfigured)
             throw new MailFault("client_not_configured", 409);
 
-        var port = FreeLoopbackPort();
+        TcpListener? listener = null;
+        int port;
+        if (startListener)
+        {
+            try
+            {
+                listener = createListener?.Invoke() ?? new TcpListener(IPAddress.Loopback, 0);
+                listener.Start();
+                port = ((IPEndPoint)listener.LocalEndpoint).Port;
+            }
+            catch (Exception ex) when (ex is SocketException or InvalidOperationException or UnauthorizedAccessException)
+            {
+                logger?.LogWarning("Mail consent listener unavailable ({Type}); paste-only attempt", ex.GetType().Name);
+                try { listener?.Stop(); } catch (SocketException) { }
+                listener = null;
+                port = PasteOnlyPort();
+            }
+        }
+        else port = PasteOnlyPort();
+
         var redirectUri = $"http://127.0.0.1:{port}/";
         var verifier = Pkce.CreateVerifier();
         var attempt = new Attempt(ownerUserId, new DesktopClient(config.ClientId!, config.ClientSecret!),
-            Pkce.CreateState(), verifier, redirectUri, port, _clock.GetUtcNow() + AttemptLifetime);
-
-        if (startListener)
-        {
-            var listener = new HttpListener();
-            listener.Prefixes.Add(redirectUri);
-            listener.Start();
-            attempt.Listener = listener;
-        }
+            Pkce.CreateState(), verifier, redirectUri, port, _clock.GetUtcNow() + AttemptLifetime, listener);
+        var token = attempt.LifetimeToken;
 
         Attempt? previous;
         lock (_gate) { previous = _attempt; _attempt = attempt; }
-        previous?.Dispose();
+        previous?.Close();
 
-        if (attempt.Listener != null)
-            _ = Task.Run(() => ListenAsync(attempt));
+        if (listener != null)
+            _ = Task.Run(async () =>
+            {
+                try { await ListenAsync(attempt, listener, token); }
+                catch (Exception ex) { logger?.LogWarning("Mail consent listener stopped ({Type})", ex.GetType().Name); Close(attempt); }
+            });
         _ = Task.Run(async () =>
         {
-            try { await Task.Delay(AttemptLifetime, attempt.Lifetime.Token); }
+            try { await Task.Delay(AttemptLifetime, token); }
             catch (OperationCanceledException) { return; }
             Close(attempt);
         });
@@ -93,6 +118,8 @@ public sealed class MailConsent(
         {
             ["authUrl"] = authUrl,
             ["redirectUri"] = redirectUri,
+            ["listening"] = listener != null,
+            ["mode"] = listener != null ? "loopback" : "paste-only",
             ["expiresAt"] = attempt.ExpiresAt.ToString("O"),
             ["scope"] = MailData.ReadonlyScope,
         };
@@ -140,80 +167,134 @@ public sealed class MailConsent(
         return status;
     }
 
-    private async Task ListenAsync(Attempt attempt)
+    private async Task ListenAsync(Attempt attempt, TcpListener listener, CancellationToken token)
     {
-        var listener = attempt.Listener!;
-        while (!attempt.Lifetime.IsCancellationRequested && listener.IsListening)
+        while (!token.IsCancellationRequested)
         {
-            HttpListenerContext context;
-            try { context = await listener.GetContextAsync(); }
-            catch (Exception ex) when (ex is HttpListenerException or ObjectDisposedException or InvalidOperationException) { return; }
-
-            var response = context.Response;
-            try
+            TcpClient client;
+            try { client = await listener.AcceptTcpClientAsync(token); }
+            catch (Exception ex) when (ex is OperationCanceledException or SocketException or ObjectDisposedException or InvalidOperationException)
+            { return; }
+            using (client)
             {
-                if (context.Request.HttpMethod != "GET" || context.Request.Url?.AbsolutePath != "/")
-                {
-                    await WriteAsync(response, 404, "Not found.");
-                    continue;
-                }
-                var query = context.Request.QueryString;
-                try
-                {
-                    await CompleteAsync(attempt, attempt.OwnerUserId, query["state"], query["code"], query["error"], CancellationToken.None);
-                    await WriteAsync(response, 200, "Mail is connected with read-only Gmail access. You can close this window.");
-                }
-                catch (MailFault fault) when (fault.Code == "state_mismatch")
-                {
-                    // An unverified request does not consume the attempt.
-                    await WriteAsync(response, 400, "This sign-in response does not match the pending request.");
-                }
-                catch (Exception ex) when (ex is MailFault or MailOAuthException or GmailApiException or MailReauthRequiredException)
-                {
-                    logger?.LogWarning("Mail consent failed: {Reason}", ex is MailFault f ? f.Code : ex is MailOAuthException o ? o.Code : ex.GetType().Name);
-                    await WriteAsync(response, 400, ex is MailOAuthException oauthError
-                        ? "Connecting Mail failed: " + oauthError.Message
-                        : "Connecting Mail failed. Return to Settings → Mail and try again.");
-                }
+                await HandleAsync(attempt, client, token);
             }
-            catch (Exception ex) when (ex is HttpListenerException or ObjectDisposedException or InvalidOperationException) { return; }
             if (attempt.Used) { Close(attempt); return; }
         }
     }
 
-    private static async Task WriteAsync(HttpListenerResponse response, int status, string message)
+    /// <summary>
+    /// One connection, one response. Any failure, including a storage error while
+    /// connecting, is answered to the browser; a claimed attempt is then closed by the
+    /// caller, so nothing is left half-open and no task faults unobserved.
+    /// </summary>
+    private async Task HandleAsync(Attempt attempt, TcpClient client, CancellationToken token)
+    {
+        NetworkStream stream;
+        try { stream = client.GetStream(); }
+        catch (Exception ex) when (ex is InvalidOperationException or ObjectDisposedException) { return; }
+        using var readTimeout = CancellationTokenSource.CreateLinkedTokenSource(token);
+        readTimeout.CancelAfter(RequestReadTimeout);
+        try
+        {
+            var target = await ReadRequestTargetAsync(stream, readTimeout.Token);
+            if (target is null) { await WriteAsync(stream, 400, "Bad request."); return; }
+            var question = target.IndexOf('?');
+            var path = question < 0 ? target : target[..question];
+            if (path != "/") { await WriteAsync(stream, 404, "Not found."); return; }
+            var query = QueryHelpers.ParseQuery(question < 0 ? "" : target[question..]);
+            try
+            {
+                await CompleteAsync(attempt, attempt.OwnerUserId,
+                    query.TryGetValue("state", out var state) ? state.ToString() : null,
+                    query.TryGetValue("code", out var code) ? code.ToString() : null,
+                    query.TryGetValue("error", out var error) ? error.ToString() : null, CancellationToken.None);
+                await WriteAsync(stream, 200, "Mail is connected with read-only Gmail access. You can close this window.");
+            }
+            catch (MailFault fault) when (fault.Code == "state_mismatch")
+            {
+                // An unverified request does not consume the attempt.
+                await WriteAsync(stream, 400, "This sign-in response does not match the pending request.");
+            }
+            catch (MailOAuthException ex)
+            {
+                logger?.LogWarning("Mail consent failed: {Reason}", ex.Code);
+                await WriteAsync(stream, 400, "Connecting Mail failed: " + ex.Message);
+            }
+            catch (Exception ex)
+            {
+                // Storage, Gmail, or anything else: answer the browser, never leak details.
+                attempt.TryClaim();
+                logger?.LogWarning("Mail consent failed: {Reason}", ex is MailFault f ? f.Code : ex.GetType().Name);
+                await WriteAsync(stream, 500, "Connecting Mail failed. Return to Settings → Mail and try again.");
+            }
+        }
+        catch (Exception ex) when (ex is IOException or SocketException or OperationCanceledException or ObjectDisposedException)
+        {
+            // Client went away or was too slow; the attempt stays pending unless it was claimed.
+        }
+    }
+
+    /// <summary>Reads the request head (bounded size and time) and returns the GET target, or null.</summary>
+    internal static async Task<string?> ReadRequestTargetAsync(Stream stream, CancellationToken ct)
+    {
+        var buffer = new byte[MaxRequestHeadBytes];
+        var length = 0;
+        while (length < buffer.Length)
+        {
+            var read = await stream.ReadAsync(buffer.AsMemory(length), ct);
+            if (read == 0) break;
+            length += read;
+            var head = Encoding.ASCII.GetString(buffer, 0, length);
+            if (head.Contains("\r\n\r\n", StringComparison.Ordinal) || head.Contains("\n\n", StringComparison.Ordinal)) break;
+        }
+        var text = Encoding.ASCII.GetString(buffer, 0, length);
+        var lineEnd = text.IndexOf('\n');
+        if (lineEnd < 0) return null;
+        var parts = text[..lineEnd].TrimEnd('\r').Split(' ');
+        if (parts.Length != 3 || parts[0] != "GET" || !parts[1].StartsWith('/') || !parts[2].StartsWith("HTTP/1.", StringComparison.Ordinal))
+            return null;
+        return parts[1];
+    }
+
+    private static async Task WriteAsync(Stream stream, int status, string message)
     {
         var html = "<!doctype html><meta charset=\"utf-8\"><title>Mail</title><body style=\"font-family:sans-serif;padding:2rem\"><p>"
             + WebUtility.HtmlEncode(message) + "</p></body>";
-        var bytes = Encoding.UTF8.GetBytes(html);
-        response.StatusCode = status;
-        response.ContentType = "text/html; charset=utf-8";
-        response.Headers["Cache-Control"] = "no-store";
-        response.Headers["Referrer-Policy"] = "no-referrer";
-        response.ContentLength64 = bytes.Length;
-        await response.OutputStream.WriteAsync(bytes);
-        response.Close();
+        var body = Encoding.UTF8.GetBytes(html);
+        var reason = status switch { 200 => "OK", 400 => "Bad Request", 404 => "Not Found", _ => "Internal Server Error" };
+        var head = Encoding.ASCII.GetBytes(
+            $"HTTP/1.1 {status} {reason}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {body.Length}\r\n"
+            + "Cache-Control: no-store\r\nReferrer-Policy: no-referrer\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n");
+        await stream.WriteAsync(head);
+        await stream.WriteAsync(body);
+        await stream.FlushAsync();
     }
 
     private void Close(Attempt attempt)
     {
         lock (_gate) { if (ReferenceEquals(_attempt, attempt)) _attempt = null; }
-        attempt.Dispose();
+        attempt.Close();
     }
 
     public void Cancel()
     {
         Attempt? attempt;
         lock (_gate) { attempt = _attempt; _attempt = null; }
-        attempt?.Dispose();
+        attempt?.Close();
     }
 
-    internal static int FreeLoopbackPort()
+    /// <summary>A port for the redirect URI when no listener runs (the browser page will fail; the owner pastes it).</summary>
+    private static int PasteOnlyPort()
     {
-        var probe = new TcpListener(IPAddress.Loopback, 0);
-        probe.Start();
-        try { return ((IPEndPoint)probe.LocalEndpoint).Port; }
-        finally { probe.Stop(); }
+        try
+        {
+            var probe = new TcpListener(IPAddress.Loopback, 0);
+            probe.Start();
+            try { return ((IPEndPoint)probe.LocalEndpoint).Port; }
+            finally { probe.Stop(); }
+        }
+        catch (SocketException) { return Random.Shared.Next(49152, 65535); }
     }
 
     /// <summary>Test hook: the pending attempt's state, never exposed over HTTP.</summary>
