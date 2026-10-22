@@ -1,0 +1,68 @@
+/* Compiled per-plugin Tailwind for the .leafpkg bundle. Theme + utilities only:
+   the RedLeaf shell already ships preflight and base styles, so this file must
+   never re-emit them. */
+@import "@redbamboo/ui/tokens.css";
+
+@layer theme, base, components, utilities, utilities;
+@import "tailwindcss/theme.css" layer(theme);
+@import "tailwindcss/utilities.css" layer(utilities);
+@source "./";
+
+.mail-card {
+  border: 1px solid var(--color-border-subtle);
+  border-radius: 0.5rem;
+  margin-bottom: 0.75rem;
+  padding: 0.75rem;
+}
+
+.mail-status {
+  align-items: flex-start;
+  background: color-mix(in srgb, var(--color-accent-sky, var(--color-accent-teal)) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--color-accent-sky, var(--color-accent-teal)) 30%, var(--color-border-subtle));
+  border-radius: 0.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  margin-bottom: 0.75rem;
+  padding: 0.75rem;
+}
+
+.mail-status > span,
+.mail-muted {
+  color: var(--color-text-muted);
+  font-size: 0.75rem;
+}
+
+.mail-checklist {
+  color: var(--color-text-muted);
+  font-size: 0.75rem;
+  line-height: 1.5;
+  list-style: decimal;
+  margin: 0.25rem 0 0.5rem 1.25rem;
+}
+
+.mail-checklist code,
+.mail-muted code {
+  font-size: 0.7rem;
+}
+
+.mail-warning {
+  color: var(--color-accent-amber, var(--color-accent-red));
+  font-size: 0.75rem;
+}
+
+.mail-card select,
+.mail-card textarea {
+  background: transparent;
+  border: 1px solid var(--color-border-subtle);
+  border-radius: 0.25rem;
+  color: var(--color-text-primary);
+  font-size: 0.75rem;
+  padding: 0.25rem;
+}
+
+.mail-card textarea {
+  font-family: var(--font-mono, monospace);
+  min-height: 4rem;
+  width: 100%;
+}
