@@ -141,14 +141,20 @@ account is connected.
 ## Google setup (owner, once)
 
 1. In Google Cloud Console, create your own project and **enable the Gmail API**.
-2. Google Auth Platform → **Branding**: set an app name and your support email.
-3. **Audience**: External, then **Publish app → In production**. It may stay unverified for personal use.
+2. Google Auth Platform → **Branding**: fill in the app name, user support email, **app home page** URL and
+   **privacy policy** URL, plus the developer contact email. **Publish app** stays unavailable until Branding is
+   complete. The repository URL (`https://github.com/RedBamboo-Interactive/leaf-mail`) works as the home page, and
+   `https://github.com/RedBamboo-Interactive/leaf-mail#privacy-model` works as the privacy policy.
+3. **Audience**: External, then **Publish app → In production**. It stays unverified, which is fine for personal use.
    In *Testing* mode Google expires refresh tokens after 7 days.
-4. **Data Access**: add only `.../auth/gmail.readonly`.
+4. **Data Access**: **leave it empty.** Adding `gmail.readonly` there makes it a declared restricted scope and opens
+   Google's verification form (justification and a YouTube demo), which a personal install does not need. Mail
+   requests `gmail.readonly` at consent time, and that works for an unverified app.
 5. **Clients**: Create client → **Desktop app**, then download the JSON.
 6. In RedLeaf, open **Settings → Mail**, upload the JSON, pick the bound agent, and click **Connect**.
 
-During consent Google warns that the app is unverified: choose Advanced → continue.
+During consent Google shows a one-time "Google hasn't verified this app" warning: choose Advanced → continue to
+your app, then allow read access to Gmail.
 
 Consent uses the authorization-code flow:
 - PKCE S256, `access_type=offline`, `prompt=consent`, and a 256-bit random `state` that is verified in constant time and is single-use.

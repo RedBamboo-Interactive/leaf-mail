@@ -182,21 +182,24 @@ export function MailSettings() {
     <p className="mb-3 text-xs text-text-muted leading-relaxed">
       Mail gives you and your bound agent read-only access to one Gmail account. It requests only
       the <code>gmail.readonly</code> scope, so it cannot send, change, or delete mail. Message bodies are fetched on
-      demand and never stored; only metadata is kept for 30 days.
+      demand and never stored; only message ids are kept (30 days) to track sync.
     </p>
 
     <SectionHeader>1 · Google Cloud setup</SectionHeader>
     <ol className="mail-checklist">
       <li>In Google Cloud Console, create a project of your own.</li>
       <li>APIs &amp; Services → Library: enable the <strong>Gmail API</strong>.</li>
-      <li>Google Auth Platform → <strong>Branding</strong>: set an app name and your support email.</li>
-      <li><strong>Audience</strong>: User type External, then <strong>Publish app → In production</strong>. The app can stay unverified for personal use.</li>
-      <li><strong>Data Access</strong>: add only <code>https://www.googleapis.com/auth/gmail.readonly</code>.</li>
+      <li>Google Auth Platform → <strong>Branding</strong>: fill in the app name, support email, <strong>home page URL</strong> and
+        <strong> privacy policy URL</strong> (the repository URL and <code>…/leaf-mail#privacy-model</code> work).
+        <strong> Publish app</strong> only becomes available once Branding is complete.</li>
+      <li><strong>Audience</strong>: User type External, then <strong>Publish app → In production</strong>. It stays unverified, which is fine for personal use.</li>
+      <li><strong>Data Access</strong>: <strong>leave it empty</strong>. Adding <code>gmail.readonly</code> there opens Google's
+        verification form, which a personal install does not need. Mail requests the scope when you connect.</li>
       <li><strong>Clients</strong>: Create client → Application type <strong>Desktop app</strong>, then download the JSON.</li>
     </ol>
     <p className="mail-warning mb-3">
       If the app stays in Testing mode, Google expires its tokens after 7 days and Mail will ask you to reconnect weekly.
-      During consent, Google warns that the app is unverified: choose Advanced → continue, since it is your own project.
+      During consent, Google warns once that the app is unverified: choose Advanced → continue, since it is your own project.
     </p>
 
     <SectionHeader>2 · OAuth client</SectionHeader>
