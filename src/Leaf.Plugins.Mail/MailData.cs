@@ -95,11 +95,27 @@ public sealed record MailConfigSnapshot(
     string? AgentId,
     string? ClientId,
     string? ClientSecret,
-    bool LiveEnabled,
+    LiveApproval LiveApproval,
     IReadOnlySet<string> LiveExcludedCategories,
     bool BindingIntact = true)
 {
     public bool ClientConfigured => ClientId != null && ClientSecret != null;
+}
+
+/// <summary>
+/// The owner's explicit approval to show new mail (sender and subject only) in LIVE, as
+/// Nova's <c>OwnerApprovedSummary</c> disclosure requires (same shape as Body's live
+/// policy). Every change gets a fresh <see cref="ApprovalId"/>, so a notice queued under an
+/// earlier approval is dropped at projection time. Default: off.
+/// </summary>
+public sealed record LiveApproval(bool Enabled, string? ApprovalId, string? ApprovedBy, string? ApprovedAt)
+{
+    public static readonly LiveApproval Off = new(false, null, null, null);
+
+    /// <summary>Effective only when enabled, identified, and approved by the current owner.</summary>
+    public bool ValidFor(string? ownerUserId)
+        => Enabled && !string.IsNullOrEmpty(ApprovalId) && ownerUserId != null
+            && Guid.TryParse(ApprovedBy, out var approver) && Guid.TryParse(ownerUserId, out var owner) && approver == owner;
 }
 
 public sealed record MailAccountSnapshot(

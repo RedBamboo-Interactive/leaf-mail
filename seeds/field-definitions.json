@@ -3,7 +3,10 @@
   { "parentType": "mail-config", "slug": "agent_id", "name": "Bound Agent", "fieldType": "string", "sortOrder": 1, "description": "Mail's copy of the kernel owner_agent_id: the agent that may read mail for the owner. Changes only through Mail." },
   { "parentType": "mail-config", "slug": "client_id", "name": "OAuth Client ID", "fieldType": "secret", "sortOrder": 2, "description": "Google Desktop app OAuth client id. Encrypted and never returned over HTTP." },
   { "parentType": "mail-config", "slug": "client_secret", "name": "OAuth Client Secret", "fieldType": "secret", "sortOrder": 3, "description": "Google Desktop app OAuth client secret. Encrypted and never returned over HTTP." },
-  { "parentType": "mail-config", "slug": "live_enabled", "name": "LIVE New-Mail Notices", "fieldType": "boolean", "sortOrder": 4, "defaultValue": "true", "description": "Post a quoted sender + subject notice to the owner's confidential LIVE for new Inbox mail." },
+  { "parentType": "mail-config", "slug": "live_approved", "name": "Show New Mail in LIVE", "fieldType": "boolean", "sortOrder": 4, "defaultValue": "false", "description": "The owner's explicit approval to show new Inbox mail (sender and subject only) in LIVE as an owner-approved summary. Off by default; set only by the owner in Settings -> Mail." },
+  { "parentType": "mail-config", "slug": "live_approval_id", "name": "LIVE Approval ID", "fieldType": "string", "sortOrder": 6, "description": "Fresh on every change; notices queued under an older approval are dropped." },
+  { "parentType": "mail-config", "slug": "live_approved_by", "name": "LIVE Approved By", "fieldType": "string", "sortOrder": 7 },
+  { "parentType": "mail-config", "slug": "live_approved_at", "name": "LIVE Approved At", "fieldType": "string", "sortOrder": 8 },
   { "parentType": "mail-config", "slug": "live_excluded_categories", "name": "LIVE Excluded Categories", "fieldType": "json", "sortOrder": 5, "description": "Gmail category labels that never produce LIVE notices. Default: promotions, social, forums." },
 
   { "parentType": "mail-account", "slug": "email", "name": "Email", "fieldType": "string", "sortOrder": 0, "description": "Mailbox address reported by Gmail after consent." },

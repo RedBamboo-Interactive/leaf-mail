@@ -24,7 +24,7 @@ public sealed class EndpointTests : IAsyncLifetime
 
     public async Task InitializeAsync()
     {
-        await _h.ConfigureAsync();
+        await _h.ConfigureAsync(approveLive: false);
         _h.Entities.Add("discussion", "d1", new JsonObject
         {
             ["discussion_id"] = "disc-private-1", ["app"] = "nova", ["owner_id"] = Harness.Owner, ["agent"] = Harness.Agent,
@@ -59,6 +59,7 @@ public sealed class EndpointTests : IAsyncLifetime
             Principals["agent"] = CallerTests.Execution(CallerTests.PrivateNovaAgent());
             Principals["discord"] = CallerTests.Execution(CallerTests.PrivateNovaAgent(extraContext:
                 new JsonObject { ["kind"] = "external-conversation", ["id"] = "discord:1:2" }));
+            Principals["other-user"] = CallerTests.User("33333333-3333-3333-3333-333333333333");
             Principals["other-agent"] = CallerTests.Execution(CallerTests.PrivateNovaAgent(agent: "44444444-4444-4444-4444-444444444444"));
         }
     }
@@ -106,7 +107,7 @@ public sealed class EndpointTests : IAsyncLifetime
     [Theory]
     [InlineData("POST", "/oauth/start", null)]
     [InlineData("POST", "/disconnect", null)]
-    [InlineData("PUT", "/config", "{\"live_enabled\":false}")]
+    [InlineData("PUT", "/config", "{\"live_approved\":true}")]
     [InlineData("PUT", "/client", "{}")]
     [InlineData("GET", "/agents", null)]
     public async Task Settings_routes_reject_agent_executions(string method, string path, string? json)
@@ -114,6 +115,34 @@ public sealed class EndpointTests : IAsyncLifetime
         var response = await Send(new HttpMethod(method), path, "agent", json);
         Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
         Assert.Contains("owner_user_required", await response.Content.ReadAsStringAsync());
+    }
+
+    [Theory]
+    [InlineData("local", HttpStatusCode.Unauthorized)]
+    [InlineData("other-user", HttpStatusCode.Forbidden)]
+    [InlineData("agent", HttpStatusCode.Forbidden)]
+    [InlineData("discord", HttpStatusCode.Forbidden)]
+    [InlineData("other-agent", HttpStatusCode.Forbidden)]
+    public async Task Live_approval_toggle_rejects_everyone_but_the_owner_session(string principal, HttpStatusCode expected)
+    {
+        Assert.Equal(expected, (await Send(HttpMethod.Put, "/config", principal, """{"live_approved":true}""")).StatusCode);
+        Assert.Equal(LiveApproval.Off, await _h.Store.GetLiveApprovalAsync());
+    }
+
+    [Fact]
+    public async Task Live_approval_toggle_is_written_by_the_owner_session()
+    {
+        var on = await Send(HttpMethod.Put, "/config", "owner", """{"live_approved":true}""");
+        Assert.Equal(HttpStatusCode.OK, on.StatusCode);
+        Assert.Contains("\"live_approved\":true", await on.Content.ReadAsStringAsync());
+        var approval = await _h.Store.GetLiveApprovalAsync();
+        Assert.True(approval.Enabled);
+        Assert.Equal(Harness.Owner, approval.ApprovedBy);
+
+        var off = await Send(HttpMethod.Put, "/config", "owner", """{"live_approved":false}""");
+        Assert.Equal(HttpStatusCode.OK, off.StatusCode);
+        Assert.Equal(LiveApproval.Off, await _h.Store.GetLiveApprovalAsync());
+        Assert.Equal(HttpStatusCode.BadRequest, (await Send(HttpMethod.Put, "/config", "owner", """{"live_approved":"yes"}""")).StatusCode);
     }
 
     [Fact]
@@ -143,7 +172,7 @@ public sealed class EndpointTests : IAsyncLifetime
     public async Task Owner_can_bind_agent_and_filters_but_not_unknown_settings()
     {
         var ok = await Send(HttpMethod.Put, "/config", "owner",
-            $$"""{"live_excluded_categories":["CATEGORY_PROMOTIONS"],"live_enabled":true}""");
+            $$"""{"live_excluded_categories":["CATEGORY_PROMOTIONS"],"live_approved":true}""");
         Assert.Equal(HttpStatusCode.OK, ok.StatusCode);
         Assert.Equal(["CATEGORY_PROMOTIONS"], (await _h.Store.GetConfigAsync()).LiveExcludedCategories);
         Assert.Equal(HttpStatusCode.BadRequest, (await Send(HttpMethod.Put, "/config", "owner", """{"owner_user_id":"x"}""")).StatusCode);

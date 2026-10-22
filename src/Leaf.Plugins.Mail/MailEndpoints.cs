@@ -110,6 +110,9 @@ internal static class MailEndpoints
             await store.ClaimOwnerAsync(caller.UserId, caller.IsAdmin, c.RequestAborted);
             if (patch.Remove("agent_id", out var agent))
                 await store.SetAgentAsync(agent?.GetValue<string>(), c.RequestAborted);
+            // Owner-session-only (OwnerUser above): the explicit LIVE approval.
+            if (patch.Remove("live_approved", out var approved))
+                await store.SetLiveApprovalAsync(approved!.GetValue<bool>(), caller.UserId, c.RequestAborted);
             if (patch.Count > 0) await store.PatchConfigAsync(patch, c.RequestAborted);
             poller.Wake();
             return Results.Ok(await service.StatusAsync(c.RequestAborted));
@@ -193,10 +196,10 @@ internal static class MailEndpoints
                         throw new ArgumentException("agent_id must be an agent entity id");
                     patch["agent_id"] = agentGuid.ToString();
                     break;
-                case "live_enabled":
-                    if (value is not JsonValue b || !b.TryGetValue<bool>(out var enabled))
-                        throw new ArgumentException("live_enabled must be a boolean");
-                    patch["live_enabled"] = enabled;
+                case "live_approved":
+                    if (value is not JsonValue b || !b.TryGetValue<bool>(out var approved))
+                        throw new ArgumentException("live_approved must be a boolean");
+                    patch["live_approved"] = approved;
                     break;
                 case "live_excluded_categories":
                     if (value is not JsonArray array) throw new ArgumentException("live_excluded_categories must be an array");

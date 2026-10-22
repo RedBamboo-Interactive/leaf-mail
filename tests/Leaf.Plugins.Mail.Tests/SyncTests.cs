@@ -47,7 +47,7 @@ public sealed class SyncTests
         var live = Assert.Single(h.Live);
         Assert.Contains("> From: Example Sender\n> Subject: Your login link", live.Content);
         Assert.Equal("mail:new:m1", live.IdempotencyKey);
-        Assert.Equal(PluginLiveDisclosure.ConfidentialOnly, live.Recipient!.Disclosure);
+        Assert.Equal(PluginLiveDisclosure.OwnerApprovedSummary, live.Recipient!.Disclosure);
 
         var account = (await h.Store.GetAccountAsync())!;
         Assert.Equal("1010", account.HistoryId);

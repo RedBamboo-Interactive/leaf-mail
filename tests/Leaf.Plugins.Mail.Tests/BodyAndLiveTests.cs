@@ -202,7 +202,7 @@ public sealed class LiveFormatterTests
         var events = new MemoryEvents();
         var outbox = new MailLiveOutbox(events);
         var notice = Assert.Single(MailLiveFormatter.Plan([Mail("m1", "Example Sender", "Secret subject", "INBOX")], Defaults, false));
-        await outbox.PublishAsync(notice, Harness.Owner, Harness.Agent, default);
+        await outbox.PublishAsync(notice, Harness.Owner, Harness.Agent, Leaf.Sdk.Services.PluginLiveDisclosure.ConfidentialOnly, null, default);
 
         var evt = Assert.Single(events.Published);
         Assert.Equal(MailEvents.LivePending, evt.EventType);

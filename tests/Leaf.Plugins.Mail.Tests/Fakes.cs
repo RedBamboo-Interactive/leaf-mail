@@ -216,7 +216,7 @@ internal sealed class Harness
         OAuth = new GoogleOAuthClient(http, Endpoints);
         Tokens = new MailTokenCache(OAuth, Store);
         Gmail_ = new GmailClient(http, Endpoints, Tokens, new MailBackoff((_, _) => Task.CompletedTask));
-        Outbox = new MailLiveOutbox(Events);
+        Outbox = new MailLiveOutbox(Events, async ct => (await Store.GetPolicyAsync(ct), await Store.GetLiveApprovalAsync(ct)));
         Service = new MailService(Store, Tokens, Gmail_, OAuth, Records, Outbox);
         // Behave like the kernel registry: the projector resolves each nonce event.
         Events.OnPublish = async evt =>
@@ -225,11 +225,12 @@ internal sealed class Harness
         };
     }
 
-    public async Task ConfigureAsync(bool connected = true, string? historyId = "1000", bool backfilled = true)
+    public async Task ConfigureAsync(bool connected = true, string? historyId = "1000", bool backfilled = true, bool approveLive = true)
     {
         await Store.EnsureConfigAsync();
         await Store.ClaimOwnerAsync(Owner, isAdmin: true);
         await Store.SetAgentAsync(Agent);
+        if (approveLive) await Store.SetLiveApprovalAsync(true, Owner);
         await Store.PatchConfigAsync(new JsonObject
         {
             ["client_id"] = ClientId,

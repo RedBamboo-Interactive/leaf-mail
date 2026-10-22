@@ -21,9 +21,11 @@ namespace Leaf.Plugins.Mail;
 public sealed class MailStore(IEntityStore entities, ILogger<MailStore>? logger = null)
 {
     private static readonly string[] BindingKeys = ["confidential", "owner_id", "owner_user_id", "owner_agent_id", "agent_id"];
+    private static readonly string[] ApprovalKeys = ["live_approved", "live_approval_id", "live_approved_by", "live_approved_at"];
     private readonly SemaphoreSlim _configGate = new(1, 1);
     private readonly SemaphoreSlim _bindingGate = new(1, 1);
     private MailPolicy? _pinned;
+    private LiveApproval? _pinnedApproval;
 
     public IEntityStore Entities => entities;
 
@@ -45,7 +47,7 @@ public sealed class MailStore(IEntityStore entities, ILogger<MailStore>? logger 
                 new JsonObject
                 {
                     ["confidential"] = true,
-                    ["live_enabled"] = true,
+                    // No live_approved: new-mail LIVE notices stay off until the owner approves them.
                     ["live_excluded_categories"] = new JsonArray(MailData.DefaultLiveExcludedCategories
                         .Select(c => (JsonNode)JsonValue.Create(c)).ToArray()),
                 }, ct);
@@ -56,11 +58,11 @@ public sealed class MailStore(IEntityStore entities, ILogger<MailStore>? logger 
 
     public Task<MailConfigSnapshot> GetConfigAsync(CancellationToken ct = default) => EnsureConfigAsync(ct);
 
-    /// <summary>Non-binding settings only (client, LIVE filters). Binding keys are rejected.</summary>
+    /// <summary>Non-binding settings only (client, LIVE filters). Binding and approval keys are rejected.</summary>
     public async Task<MailConfigSnapshot> PatchConfigAsync(JsonObject patch, CancellationToken ct = default)
     {
-        if (BindingKeys.Any(patch.ContainsKey))
-            throw new InvalidOperationException("Binding fields change only through the binding API");
+        if (BindingKeys.Any(patch.ContainsKey) || ApprovalKeys.Any(patch.ContainsKey))
+            throw new InvalidOperationException("Binding and LIVE approval fields change only through their own API");
         var config = await EnsureConfigAsync(ct);
         return ConfigFrom(await entities.PatchAsync(config.Entity.Id, patch, ct: ct));
     }
@@ -160,6 +162,63 @@ public sealed class MailStore(IEntityStore entities, ILogger<MailStore>? logger 
         finally { _bindingGate.Release(); }
     }
 
+    /// <summary>
+    /// The effective LIVE approval: the one Mail last wrote (pinned), reverting an approval
+    /// changed outside Mail (for instance an agent PATCHing <c>live_approved</c> on), and
+    /// valid only when approved by the current owner. Off by default.
+    /// </summary>
+    public async Task<LiveApproval> GetLiveApprovalAsync(CancellationToken ct = default)
+    {
+        var policy = await GetPolicyAsync(ct);
+        var stored = (await EnsureConfigAsync(ct)).LiveApproval;
+        var pinned = _pinnedApproval;
+        if (pinned == null || stored != pinned)
+        {
+            await _bindingGate.WaitAsync(ct);
+            try
+            {
+                pinned = _pinnedApproval;
+                stored = (await EnsureConfigAsync(ct)).LiveApproval;
+                if (pinned == null) _pinnedApproval = pinned = stored;
+                else if (stored != pinned)
+                {
+                    BindingRestoreCount++;
+                    logger?.LogWarning("Mail LIVE approval was changed outside Mail; restoring the owner's setting");
+                    await WriteApprovalAsync(pinned, ct);
+                }
+            }
+            finally { _bindingGate.Release(); }
+        }
+        return pinned.ValidFor(policy.OwnerUserId) ? pinned : LiveApproval.Off;
+    }
+
+    /// <summary>Owner-only toggle. Every change mints a new approval id (as Body does).</summary>
+    public async Task<LiveApproval> SetLiveApprovalAsync(bool enabled, string ownerUserId, CancellationToken ct = default)
+    {
+        var policy = await GetPolicyAsync(ct);
+        if (policy.OwnerUserId == null || !SameGuid(policy.OwnerUserId, ownerUserId))
+            throw new MailFault("owner_required", 403);
+        var approval = new LiveApproval(enabled, Guid.NewGuid().ToString("N"), policy.OwnerUserId,
+            DateTimeOffset.UtcNow.ToString("O"));
+        await _bindingGate.WaitAsync(ct);
+        try
+        {
+            await WriteApprovalAsync(approval, ct);
+            _pinnedApproval = approval;
+        }
+        finally { _bindingGate.Release(); }
+        return approval;
+    }
+
+    private async Task WriteApprovalAsync(LiveApproval approval, CancellationToken ct)
+        => await entities.PatchAsync((await EnsureConfigAsync(ct)).Entity.Id, new JsonObject
+        {
+            ["live_approved"] = approval.Enabled,
+            ["live_approval_id"] = approval.ApprovalId,
+            ["live_approved_by"] = approval.ApprovedBy,
+            ["live_approved_at"] = approval.ApprovedAt,
+        }, ct: ct);
+
     private Task WriteBindingAsync(MailConfigSnapshot config, MailPolicy binding, CancellationToken ct)
         => entities.PatchAsync(config.Entity.Id, new JsonObject
         {
@@ -253,7 +312,11 @@ public sealed class MailStore(IEntityStore entities, ILogger<MailStore>? logger 
             agent,
             MailData.String(data, "client_id"),
             MailData.String(data, "client_secret"),
-            MailData.Boolean(data, "live_enabled", true),
+            new LiveApproval(
+                MailData.Boolean(data, "live_approved"),
+                MailData.String(data, "live_approval_id"),
+                MailData.String(data, "live_approved_by"),
+                MailData.String(data, "live_approved_at")),
             excluded.ToHashSet(StringComparer.Ordinal),
             intact);
     }

@@ -54,7 +54,8 @@ public sealed class MailService(
             ["client_configured"] = config.ClientConfigured,
             ["owner_configured"] = policy.OwnerUserId != null,
             ["agent_id"] = policy.AgentId,
-            ["live_enabled"] = config.LiveEnabled,
+            ["live_approved"] = config.LiveApproval.ValidFor(policy.OwnerUserId),
+            ["live_approved_at"] = config.LiveApproval.ValidFor(policy.OwnerUserId) ? config.LiveApproval.ApprovedAt : null,
             ["live_excluded_categories"] = new JsonArray(config.LiveExcludedCategories.Order(StringComparer.Ordinal)
                 .Select(c => (JsonNode)JsonValue.Create(c)).ToArray()),
             ["read_only"] = true,
@@ -202,14 +203,30 @@ public sealed class MailService(
     {
         var epoch = (int)(MailData.Long(account.Entity.Data, "health_epoch") ?? 0) + 1;
         await store.PatchAccountAsync(account, new JsonObject { ["health_epoch"] = epoch }, ct);
-        await PublishAsync(MailLiveFormatter.Health(account.Entity.Id.ToString(), status, epoch), ct);
+        await PublishAsync(MailLiveFormatter.Health(account.Entity.Id.ToString(), status, epoch), containsMailContent: false, ct);
     }
 
-    private async Task PublishAsync(LiveNotice notice, CancellationToken ct)
+    /// <summary>
+    /// New-mail notices (sender and subject) go out only under the owner's explicit LIVE
+    /// approval, as <c>OwnerApprovedSummary</c>. Health notices carry no mail content, but
+    /// Nova's contract forbids <c>OwnerApprovedSummary</c> as a default disclosure, so
+    /// without the approval they use <c>ConfidentialOnly</c> (delivered only to a
+    /// confidential LIVE). The counts-only context fragment reports reconnect needs either way.
+    /// </summary>
+    private async Task PublishAsync(LiveNotice notice, bool containsMailContent, CancellationToken ct)
     {
         var policy = await store.GetPolicyAsync(ct);
         if (policy.OwnerUserId == null || policy.AgentId == null) return;
-        try { await live.PublishAsync(notice, policy.OwnerUserId, policy.AgentId, ct); }
+        var approval = await store.GetLiveApprovalAsync(ct);
+        PluginLiveDisclosure disclosure;
+        if (approval.ValidFor(policy.OwnerUserId)) disclosure = PluginLiveDisclosure.OwnerApprovedSummary;
+        else if (containsMailContent) return;
+        else disclosure = PluginLiveDisclosure.ConfidentialOnly;
+        try
+        {
+            await live.PublishAsync(notice, policy.OwnerUserId, policy.AgentId, disclosure,
+                disclosure == PluginLiveDisclosure.OwnerApprovedSummary ? approval.ApprovalId : null, ct);
+        }
         catch (Exception ex) when (ex is not OperationCanceledException)
         { logger?.LogWarning("Mail LIVE notice could not be published: {Type}", ex.GetType().Name); }
     }
@@ -258,9 +275,8 @@ public sealed class MailService(
                 else
                 {
                     var stored = await StoreAsync(page.AddedMessageIds, account, policy.OwnerUserId, ct);
-                    if (config.LiveEnabled)
-                        foreach (var notice in MailLiveFormatter.Plan(stored, config.LiveExcludedCategories, backfill: false))
-                            await PublishAsync(notice, ct);
+                    foreach (var notice in MailLiveFormatter.Plan(stored, config.LiveExcludedCategories, backfill: false))
+                        await PublishAsync(notice, containsMailContent: true, ct);
                     if (page.HistoryId != null) patch["history_id"] = page.HistoryId;
                     result = SyncResult.Synced;
                 }

@@ -50,7 +50,7 @@ internal static class MailDiscovery
         },
         ["live"] = new JsonObject
         {
-            ["recipient"] = "owner + bound agent, ConfidentialOnly",
+            ["recipient"] = "owner + bound agent; new mail only with the owner's explicit approval (OwnerApprovedSummary, off by default); health uses the approval when on, else ConfidentialOnly",
             ["newMail"] = "INBOX messages outside excluded categories; sender name and subject quoted as external content; >3 per poll coalesce; never for backfill or resync",
             ["health"] = "one notice when access needs reconnecting and one when it recovers",
         },
@@ -77,7 +77,7 @@ internal static class MailDiscovery
         Add(paths, "/messages/{id}", "get", "Live message read: metadata, plain-text body (links removed, capped 20000 chars), links[], untrusted");
         Add(paths, "/threads/{id}", "get", "Live thread read: metadata and sanitized body per message, untrusted");
         Add(paths, "/agents", "get", "Owner only: agents the owner may bind Mail to");
-        Add(paths, "/config", "put", "Owner only: { agent_id, live_enabled, live_excluded_categories }");
+        Add(paths, "/config", "put", "Owner session only: { agent_id, live_approved, live_excluded_categories }");
         Add(paths, "/client", "put", "Owner only: upload a Google Desktop app (\"installed\") client JSON");
         Add(paths, "/client", "delete", "Owner only: remove the OAuth client (requires a disconnected account)");
         Add(paths, "/oauth/start", "post", "Owner only: start a PKCE consent attempt; returns { authUrl }");

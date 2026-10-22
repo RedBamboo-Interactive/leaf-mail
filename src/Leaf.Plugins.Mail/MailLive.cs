@@ -150,23 +150,33 @@ public static class MailLiveFormatter
 /// Publishes LIVE notices through the kernel projector without putting mail content on
 /// the plugin bus: the bus (and its os:events mirror) carries only an opaque nonce, and
 /// the projector resolves the pending notice in memory, exactly once, within ten minutes.
+///
+/// Disclosure follows Nova's contract. <see cref="PluginLiveDisclosure.OwnerApprovedSummary"/>
+/// is used only under the owner's explicit approval and, as in Body, the approval is
+/// re-read at projection time: a notice whose approval was revoked or replaced meanwhile,
+/// or whose owner/agent binding changed, is dropped.
 /// </summary>
-public sealed class MailLiveOutbox(IPluginEvents events, TimeProvider? clock = null)
+public sealed class MailLiveOutbox(
+    IPluginEvents events,
+    Func<CancellationToken, Task<(MailPolicy Policy, LiveApproval Approval)>>? current = null,
+    TimeProvider? clock = null)
 {
     private static readonly TimeSpan Lifetime = TimeSpan.FromMinutes(10);
     private readonly TimeProvider _clock = clock ?? TimeProvider.System;
     private readonly ConcurrentDictionary<string, Pending> _pending = new(StringComparer.Ordinal);
 
-    private sealed record Pending(PluginLiveEventProjection Projection, DateTimeOffset ExpiresAt);
+    private sealed record Pending(PluginLiveEventProjection Projection, DateTimeOffset ExpiresAt, string? ApprovalId);
 
     private int _published;
 
     /// <summary>Notices actually published (for diagnostics and tests). Contains no content.</summary>
     public int PublishedCount => Volatile.Read(ref _published);
 
-    public async Task PublishAsync(LiveNotice notice, string ownerUserId, string agentId, CancellationToken ct)
+    public async Task PublishAsync(LiveNotice notice, string ownerUserId, string agentId,
+        PluginLiveDisclosure disclosure, string? approvalId, CancellationToken ct)
     {
         if (!Guid.TryParse(ownerUserId, out _) || !Guid.TryParse(agentId, out _)) return;
+        if (disclosure == PluginLiveDisclosure.OwnerApprovedSummary && string.IsNullOrEmpty(approvalId)) return;
         var now = _clock.GetUtcNow();
         foreach (var expired in _pending.Where(p => p.Value.ExpiresAt < now).Select(p => p.Key).ToArray())
             _pending.TryRemove(expired, out _);
@@ -174,22 +184,31 @@ public sealed class MailLiveOutbox(IPluginEvents events, TimeProvider? clock = n
         var projection = new PluginLiveEventProjection(MailLiveFormatter.Source, notice.Content, notice.Metadata,
             notice.IdempotencyKey)
         {
-            Recipient = new PluginLiveEventRecipient(ownerUserId, agentId)
-            {
-                Disclosure = PluginLiveDisclosure.ConfidentialOnly,
-            },
+            Recipient = new PluginLiveEventRecipient(ownerUserId, agentId) { Disclosure = disclosure },
         };
-        _pending[nonce] = new Pending(projection, now + Lifetime);
+        _pending[nonce] = new Pending(projection, now + Lifetime, approvalId);
         await events.PublishAsync(MailEvents.LivePending, new JsonObject { ["nonce"] = nonce }, ct);
         Interlocked.Increment(ref _published);
     }
 
-    public Task<PluginLiveEventProjection?> ProjectAsync(PluginEvent evt, CancellationToken ct)
+    public async Task<PluginLiveEventProjection?> ProjectAsync(PluginEvent evt, CancellationToken ct)
     {
         if (evt.SourcePlugin != MailPlugin.PluginId || evt.EventType != MailEvents.LivePending
             || evt.Payload["nonce"] is not JsonValue value || !value.TryGetValue<string>(out var nonce)
             || !_pending.TryRemove(nonce, out var pending) || pending.ExpiresAt < _clock.GetUtcNow())
-            return Task.FromResult<PluginLiveEventProjection?>(null);
-        return Task.FromResult<PluginLiveEventProjection?>(pending.Projection);
+            return null;
+        var recipient = pending.Projection.Recipient!;
+        if (current == null)
+            return recipient.Disclosure == PluginLiveDisclosure.ConfidentialOnly ? pending.Projection : null;
+        var (policy, approval) = await current(ct);
+        if (!SameId(policy.OwnerUserId, recipient.OwnerUserId) || !SameId(policy.AgentId, recipient.AgentId))
+            return null;
+        if (recipient.Disclosure == PluginLiveDisclosure.OwnerApprovedSummary
+            && (!approval.ValidFor(policy.OwnerUserId) || approval.ApprovalId != pending.ApprovalId))
+            return null;
+        return pending.Projection;
     }
+
+    private static bool SameId(string? a, string? b)
+        => Guid.TryParse(a, out var x) && Guid.TryParse(b, out var y) && x == y;
 }

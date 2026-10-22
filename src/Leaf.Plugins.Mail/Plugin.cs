@@ -40,7 +40,12 @@ public sealed class MailPlugin : ILeafPlugin
         services.AddSingleton(sp => new GmailClient(
             sp.GetRequiredKeyedService<HttpClient>(PluginId), sp.GetRequiredService<GoogleEndpoints>(),
             sp.GetRequiredService<MailTokenCache>(), new MailBackoff()));
-        services.AddSingleton(sp => new MailLiveOutbox(sp.GetRequiredKeyedService<IPluginEvents>(PluginId)));
+        services.AddSingleton(sp =>
+        {
+            var store = sp.GetRequiredService<MailStore>();
+            return new MailLiveOutbox(sp.GetRequiredKeyedService<IPluginEvents>(PluginId),
+                async ct => (await store.GetPolicyAsync(ct), await store.GetLiveApprovalAsync(ct)));
+        });
         services.AddSingleton(sp => new MailService(
             sp.GetRequiredService<MailStore>(),
             sp.GetRequiredService<MailTokenCache>(),
@@ -75,7 +80,7 @@ public sealed class MailPlugin : ILeafPlugin
         var store = host.GetRequiredService<MailStore>();
         await store.EnsureConfigAsync(ct);
         // Pin the stored owner/agent binding now, so later out-of-band edits are reverted.
-        try { await store.GetPolicyAsync(ct); }
+        try { await store.GetPolicyAsync(ct); await store.GetLiveApprovalAsync(ct); }
         catch (MailFault) { /* inconsistent binding: every caller is refused until repaired */ }
         host.GetRequiredService<MailNovaExtensions>().Start();
         var poller = host.GetRequiredService<MailPoller>();
