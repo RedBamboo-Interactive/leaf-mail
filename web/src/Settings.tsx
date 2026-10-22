@@ -1,20 +1,11 @@
-import { useCallback, useEffect, useRef, useState, type ComponentProps, type ReactNode } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import {
-  Badge,
   Button,
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogHeader,
-  DialogTitle,
-  EntityCard,
+  EntityRefField,
   Input,
-  ScrollArea,
   SectionHeader,
   SettingRow,
   Switch,
-  useEntityCardPresentation,
-  type EntityCardEntity,
 } from "@redbamboo/ui"
 import { get, post, put } from "./api"
 
@@ -37,7 +28,6 @@ type Status = {
   live_approved_at?: string | null
   live_excluded_categories: string[]
 }
-type Agent = { id: string; slug: string; name: string }
 
 const CATEGORIES: Array<{ id: string; label: string }> = [
   { id: "CATEGORY_PROMOTIONS", label: "Promotions" },
@@ -63,14 +53,12 @@ function statusLabel(status: Status | null) {
 
 export function MailSettings() {
   const [status, setStatus] = useState<Status | null>(null)
-  const [agents, setAgents] = useState<Agent[]>([])
   const [error, setError] = useState<string | null>(null)
   const [note, setNote] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [authUrl, setAuthUrl] = useState<string | null>(null)
   const [pending, setPending] = useState(false)
   const [redirectUrl, setRedirectUrl] = useState("")
-  const [agentPickerOpen, setAgentPickerOpen] = useState(false)
   const fileInput = useRef<HTMLInputElement>(null)
 
   const reload = useCallback(async () => {
@@ -87,7 +75,6 @@ export function MailSettings() {
 
   useEffect(() => {
     void reload()
-    void get<{ items: Agent[] }>(`${BASE}/agents`).then((value) => setAgents(value.items)).catch(() => setAgents([]))
   }, [reload])
 
   // While a consent attempt is open, watch for the loopback redirect to complete it.
@@ -152,16 +139,6 @@ export function MailSettings() {
 
   const saveConfig = (values: Record<string, unknown>) => run(() => put(`${BASE}/config`, values), "Saved.")
 
-  const chooseAgent = async (agentId: string | null) => {
-    setAgentPickerOpen(false)
-    await saveConfig({ agent_id: agentId })
-  }
-
-  const boundAgentId = status?.agent_id ?? null
-  const boundAgent = boundAgentId
-    ? agents.find((agent) => agent.id === boundAgentId) ?? { id: boundAgentId, slug: "", name: "Unknown agent" }
-    : null
-
   const toggleCategory = (id: string, excluded: boolean) => {
     const current = new Set(status?.live_excluded_categories ?? [])
     if (excluded) current.add(id)
@@ -216,15 +193,11 @@ export function MailSettings() {
     <p className="mb-2 text-xs text-text-muted leading-relaxed">
       Only this agent can read mail (from your private discussions) and receive Mail context and LIVE notices.
     </p>
-    <div className="mb-3">
-      {boundAgent
-        ? <AgentCard agent={boundAgent} subtitle="Bound agent"
-            actions={<Button variant="outline" size="sm" disabled={busy || !status} onClick={() => setAgentPickerOpen(true)}>Change</Button>} />
-        : <Button variant="outline" className="w-full" disabled={busy || !status} onClick={() => setAgentPickerOpen(true)}>Choose agent</Button>}
-    </div>
-    <AgentPicker open={agentPickerOpen} agents={agents} selectedId={boundAgentId ?? undefined} busy={busy}
-      onOpenChange={setAgentPickerOpen} onSelect={(agent) => void chooseAgent(agent.id)}
-      onUnbind={boundAgentId ? () => void chooseAgent(null) : undefined} />
+    {/* The shell's entity picker lists what this session may read; the backend still validates the binding. */}
+    <EntityRefField className="mb-3" targetType="agent" title="Choose an Agent"
+      description="Mail will be readable only by this Agent, from your private discussions."
+      placeholder="No agent bound" value={status?.agent_id} disabled={busy || !status}
+      onChange={(agentId) => void saveConfig({ agent_id: agentId ?? null })} />
 
     <SectionHeader>4 · Connect</SectionHeader>
     <SettingRow label="Gmail account" hint="Opens Google's consent page in a new window. Keep this tab open until it reports Connected.">
@@ -263,63 +236,4 @@ export function MailSettings() {
           onCheckedChange={(value) => toggleCategory(category.id, value)} />
       </SettingRow>)}
   </div>
-}
-
-/** One agent as an entity card; the host presentation bridge supplies the avatar when available. */
-function AgentCard({ agent, subtitle, selected, action, trailing, actions }: {
-  agent: Agent
-  subtitle: string
-  selected?: boolean
-  action?: ComponentProps<typeof EntityCard>["action"]
-  trailing?: ReactNode
-  actions?: ReactNode
-}) {
-  const fallback: EntityCardEntity = { id: agent.id, typeSlug: "agent", name: agent.name }
-  const presentation = useEntityCardPresentation(fallback)
-  const entity = presentation?.entity ?? fallback
-  return <EntityCard
-    entity={entity}
-    visual={presentation?.visual ?? { icon: "ph-bold ph-user-circle", fallbackText: entity.name, shape: "circle" }}
-    subtitle={subtitle}
-    variant="outlined"
-    selected={selected}
-    action={action}
-    trailing={trailing}
-    actions={actions}
-  />
-}
-
-function AgentPicker({ open, agents, selectedId, busy, onOpenChange, onSelect, onUnbind }: {
-  open: boolean
-  agents: Agent[]
-  selectedId?: string
-  busy: boolean
-  onOpenChange: (open: boolean) => void
-  onSelect: (agent: Agent) => void
-  onUnbind?: () => void
-}) {
-  return <Dialog open={open} onOpenChange={onOpenChange}>
-    <DialogContent>
-      <DialogHeader>
-        <DialogTitle>Choose an Agent</DialogTitle>
-        <DialogDescription>Mail will be readable only by this Agent, from your private discussions.</DialogDescription>
-      </DialogHeader>
-      <ScrollArea className="max-h-96">
-        <div className="space-y-2 pr-2">
-          {agents.length === 0 && <p className="text-xs text-text-muted">No agents are available.</p>}
-          {agents.map((agent) => <AgentCard
-            key={agent.id}
-            agent={agent}
-            subtitle="Leaf Agent"
-            selected={agent.id === selectedId}
-            action={{ kind: "button", ariaLabel: `Select ${agent.name}`, onActivate: () => { if (!busy) onSelect(agent) } }}
-            trailing={agent.id === selectedId ? <Badge variant="secondary">Current</Badge> : undefined}
-          />)}
-        </div>
-      </ScrollArea>
-      {onUnbind && <div className="flex justify-end">
-        <Button variant="ghost" size="sm" disabled={busy} onClick={onUnbind}>Unbind agent</Button>
-      </div>}
-    </DialogContent>
-  </Dialog>
 }
