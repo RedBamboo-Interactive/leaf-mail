@@ -1,0 +1,47 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>Leaf.Plugins.Mail</RootNamespace>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <!-- Leaf.Sdk is the only backend source input and the kernel supplies it at load
+       time, so it is referenced with Private=false and never copied. An explicit
+       -p:LeafSdkProject=<path> or -p:LeafSdkAssembly=<dll> wins; otherwise a sibling
+       RedLeaf checkout is used. There is no guessed NuGet fallback. -->
+  <PropertyGroup>
+    <LeafSdkProject Condition="'$(LeafSdkAssembly)' == '' And '$(LeafSdkProject)' == '' And Exists('..\..\..\redleaf\src\Leaf.Sdk\Leaf.Sdk.csproj')">..\..\..\redleaf\src\Leaf.Sdk\Leaf.Sdk.csproj</LeafSdkProject>
+  </PropertyGroup>
+  <ItemGroup Condition="'$(LeafSdkAssembly)' != ''">
+    <Reference Include="Leaf.Sdk"><HintPath>$(LeafSdkAssembly)</HintPath><Private>false</Private></Reference>
+  </ItemGroup>
+  <ItemGroup Condition="'$(LeafSdkAssembly)' == '' And '$(LeafSdkProject)' != ''">
+    <ProjectReference Include="$(LeafSdkProject)"><Private>false</Private></ProjectReference>
+  </ItemGroup>
+  <Target Name="RequireLeafSdk" BeforeTargets="ResolveReferences" Condition="'$(LeafSdkAssembly)' == '' And '$(LeafSdkProject)' == ''">
+    <Error Text="Leaf.Sdk not found. Pass -p:LeafSdkProject=&lt;RedLeaf checkout&gt;/src/Leaf.Sdk/Leaf.Sdk.csproj or -p:LeafSdkAssembly=&lt;path to Leaf.Sdk.dll&gt;." />
+  </Target>
+
+  <PropertyGroup Condition="'$(Configuration)' == 'Release'">
+    <ContinuousIntegrationBuild>true</ContinuousIntegrationBuild>
+    <PathMap>$([System.IO.Path]::GetFullPath('$(MSBuildProjectDirectory)\..\..'))=/_/mail</PathMap>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- The manifest the loader reads from disk is also the Manifest property this
+         assembly exposes; embedding the same file keeps them from drifting. -->
+    <EmbeddedResource Include="..\..\plugin.json" LogicalName="plugin.json" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Leaf.Plugins.Mail.Tests" />
+  </ItemGroup>
+
+</Project>

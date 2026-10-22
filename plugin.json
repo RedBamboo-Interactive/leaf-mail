@@ -1,0 +1,41 @@
+{
+  "id": "mail",
+  "name": "Mail",
+  "version": "0.1.0",
+  "kernelApi": "^0.1.0",
+  "description": "Read-only Gmail access for the owner and their bound agent: status, search, message and thread reads, and LIVE new-mail notices.",
+  "icon": "ph-envelope-simple",
+  "color": "sky",
+  "requires": ["entities", "records"],
+  "backend": {
+    "assembly": "Leaf.Plugins.Mail",
+    "apiNamespace": "extensions",
+    "extensions": [
+      {
+        "id": "nova-mail-context",
+        "target": "nova",
+        "slot": "context-contributor",
+        "contract": "leaf.context-fragment/1",
+        "order": 70,
+        "description": "Contributes Mail health and unread counts (never subjects, senders, or bodies) to the owner's bound agent"
+      },
+      {
+        "id": "nova-mail-live",
+        "target": "nova",
+        "slot": "live-event",
+        "contract": "leaf.live-event/1",
+        "description": "Projects new-mail notices and Mail health changes onto the owner's confidential Nova LIVE"
+      }
+    ]
+  },
+  "frontend": {
+    "package": "@redbamboo/plugin-mail",
+    "settings": {}
+  },
+  "permissions": [
+    { "kind": "net", "target": "gmail.googleapis.com", "reason": "Gmail API (scope gmail.readonly only)" },
+    { "kind": "net", "target": "oauth2.googleapis.com", "reason": "OAuth token exchange, refresh, and revocation" },
+    { "kind": "net", "target": "accounts.google.com", "reason": "Owner consent page opened in the owner's browser" },
+    { "kind": "net", "target": "127.0.0.1", "reason": "Ephemeral loopback listener receiving the OAuth redirect during a consent attempt" }
+  ]
+}
