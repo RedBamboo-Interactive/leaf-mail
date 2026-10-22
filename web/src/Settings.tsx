@@ -17,7 +17,8 @@ type Status = {
   client_configured: boolean
   owner_configured: boolean
   agent_id?: string | null
-  live_enabled: boolean
+  live_approved: boolean
+  live_approved_at?: string | null
   live_excluded_categories: string[]
 }
 type Agent = { id: string; slug: string; name: string }
@@ -218,13 +219,14 @@ export function MailSettings() {
     </div>}
 
     <SectionHeader>LIVE notices</SectionHeader>
-    <SettingRow label="New-mail notices" hint="Posts the sender name and subject of new Inbox mail to your confidential LIVE, quoted as external content. More than three at once are combined.">
-      <Switch checked={status?.live_enabled === true} disabled={busy || !status}
-        onCheckedChange={(value) => void saveConfig({ live_enabled: value })} />
+    <SettingRow label="Show new mail in LIVE (sender and subject only)"
+      hint="Off by default. When on, new Inbox mail appears in your LIVE timeline as the sender name and subject, quoted as external content (more than three at once are combined). Your agent sees LIVE in conversations and heartbeats. Message bodies are never shown there. Only you can change this, from this page.">
+      <Switch checked={status?.live_approved === true} disabled={busy || !status}
+        onCheckedChange={(value) => void saveConfig({ live_approved: value })} />
     </SettingRow>
     {CATEGORIES.map((category) =>
       <SettingRow key={category.id} label={`Skip ${category.label}`}>
-        <Switch checked={status?.live_excluded_categories.includes(category.id) === true} disabled={busy || !status || !status.live_enabled}
+        <Switch checked={status?.live_excluded_categories.includes(category.id) === true} disabled={busy || !status || !status.live_approved}
           onCheckedChange={(value) => toggleCategory(category.id, value)} />
       </SettingRow>)}
   </div>
