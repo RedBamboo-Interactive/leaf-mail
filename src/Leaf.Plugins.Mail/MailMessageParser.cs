@@ -9,7 +9,7 @@ namespace Leaf.Plugins.Mail;
 
 public sealed record MailAddress(string? Name, string? Address);
 
-/// <summary>The only message shape Mail persists: headers, labels, and Gmail's snippet. Never a body.</summary>
+/// <summary>Message headers, labels, and Gmail's snippet. Returned live; never a body.</summary>
 public sealed record MailMetadata(
     string Id,
     string? ThreadId,
@@ -20,6 +20,18 @@ public sealed record MailMetadata(
     IReadOnlyList<string> LabelIds,
     string? Snippet)
 {
+    /// <summary>
+    /// The only shape written to kernel records: no sender, recipient, subject, or snippet.
+    /// Kernel stream reads are not bound by Mail's caller policy, so content stays live-only.
+    /// </summary>
+    public JsonObject ToRecordJson() => new()
+    {
+        ["id"] = Id,
+        ["threadId"] = ThreadId,
+        ["labelIds"] = new JsonArray(LabelIds.Select(l => (JsonNode)JsonValue.Create(l)).ToArray()),
+        ["internalDate"] = Date?.ToUnixTimeMilliseconds(),
+    };
+
     public JsonObject ToJson() => new()
     {
         ["id"] = Id,
@@ -40,13 +52,21 @@ public sealed record SanitizedBody(string Text, bool Truncated, string Source, I
 /// <summary>
 /// Gmail message JSON → metadata and sanitized body. Reusable for phase-2 attachment
 /// handling through <see cref="Parts"/>, which flattens the MIME tree.
+///
+/// Hostile-input budget: decoded bodies are capped at <see cref="InputCap"/> characters
+/// before any processing, HTML is converted by a single linear pass (no backtracking
+/// regex over the document), every remaining regex is non-backtracking with a match
+/// timeout, and a timeout yields "body unavailable" instead of an error.
 /// </summary>
 public static class MailMessageParser
 {
     public const int BodyCap = 20_000;
     public const int LinkCap = 50;
+    public const int InputCap = 512 * 1024;
     private const int HeaderCap = 512;
     private const int SnippetCap = 400;
+    private static readonly TimeSpan RegexTimeout = TimeSpan.FromMilliseconds(250);
+    private const RegexOptions Linear = RegexOptions.NonBacktracking | RegexOptions.CultureInvariant;
 
     public static MailMetadata Metadata(JsonElement message)
     {
@@ -91,6 +111,7 @@ public static class MailMessageParser
     public static IReadOnlyList<MailAddress> ParseAddresses(string? header)
     {
         if (string.IsNullOrWhiteSpace(header)) return [];
+        if (header.Length > 8192) header = header[..8192];
         try
         {
             var collection = new MailAddressCollection();
@@ -105,8 +126,13 @@ public static class MailMessageParser
         }
     }
 
-    /// <summary>One leaf MIME part. Attachment parts carry a filename and/or attachmentId.</summary>
-    public sealed record Part(string MimeType, string? Filename, string? Data, string? AttachmentId, string? Charset, bool IsAttachment);
+    /// <summary>
+    /// One leaf MIME part. Gmail sets <c>filename</c> only for attachments; a part whose
+    /// content was externalized has no <c>data</c> but an <c>attachmentId</c> (fetch with
+    /// <c>messages.attachments.get</c>). <see cref="Size"/> is Gmail's byte count.
+    /// </summary>
+    public sealed record Part(string MimeType, string? Filename, string? Data, string? AttachmentId,
+        string? Charset, bool IsAttachment, long Size = 0);
 
     public static IEnumerable<Part> Parts(JsonElement payload)
     {
@@ -121,91 +147,221 @@ public static class MailMessageParser
         var mime = payload.TryGetProperty("mimeType", out var m) ? m.GetString() ?? "" : "";
         var filename = payload.TryGetProperty("filename", out var f) ? f.GetString() : null;
         string? data = null, attachmentId = null;
+        long size = 0;
         if (payload.TryGetProperty("body", out var body) && body.ValueKind == JsonValueKind.Object)
         {
             data = body.TryGetProperty("data", out var d) ? d.GetString() : null;
             attachmentId = body.TryGetProperty("attachmentId", out var a) ? a.GetString() : null;
+            if (body.TryGetProperty("size", out var z) && z.TryGetInt64(out var n)) size = n;
         }
         var headers = Headers(payload);
         var disposition = headers.GetValueOrDefault("content-disposition") ?? "";
-        var charset = Regex.Match(headers.GetValueOrDefault("content-type") ?? "", "charset=\"?([A-Za-z0-9_\\-:.]+)", RegexOptions.IgnoreCase) is { Success: true } cm
-            ? cm.Groups[1].Value : null;
-        var isAttachment = !string.IsNullOrEmpty(filename) || attachmentId != null
-            || disposition.StartsWith("attachment", StringComparison.OrdinalIgnoreCase);
-        yield return new Part(mime.ToLowerInvariant(), string.IsNullOrEmpty(filename) ? null : filename, data, attachmentId, charset, isAttachment);
+        var contentType = headers.GetValueOrDefault("content-type") ?? "";
+        var charset = CharsetOf(contentType);
+        var isAttachment = !string.IsNullOrEmpty(filename)
+            || disposition.TrimStart().StartsWith("attachment", StringComparison.OrdinalIgnoreCase);
+        yield return new Part(mime.ToLowerInvariant(), string.IsNullOrEmpty(filename) ? null : filename,
+            string.IsNullOrEmpty(data) ? null : data, attachmentId, charset, isAttachment, size);
+    }
+
+    private static string? CharsetOf(string contentType)
+    {
+        var index = contentType.IndexOf("charset=", StringComparison.OrdinalIgnoreCase);
+        if (index < 0) return null;
+        var value = contentType[(index + 8)..].Trim().Trim('"');
+        var end = value.IndexOfAny([';', ' ', '"']);
+        if (end >= 0) value = value[..end];
+        return value.Length is > 0 and <= 40 ? value : null;
+    }
+
+    /// <summary>The body part: first inline text/plain, else first inline text/html (inline or externalized).</summary>
+    public static Part? BodyPart(JsonElement message)
+    {
+        var payload = message.TryGetProperty("payload", out var p) ? p : default;
+        var parts = Parts(payload).Where(part => !part.IsAttachment && (part.Data != null || part.AttachmentId != null)).ToArray();
+        return parts.FirstOrDefault(part => part.MimeType == "text/plain")
+            ?? parts.FirstOrDefault(part => part.MimeType == "text/html");
     }
 
     /// <summary>Plain text preferred; else HTML→text with scripts/styles removed. URLs move to links.</summary>
-    public static SanitizedBody Body(JsonElement message)
+    public static SanitizedBody Body(JsonElement message) => Body(BodyPart(message));
+
+    public static SanitizedBody Body(Part? part)
     {
-        var payload = message.TryGetProperty("payload", out var p) ? p : default;
-        var parts = Parts(payload).Where(part => !part.IsAttachment && part.Data != null).ToArray();
-        var plain = parts.FirstOrDefault(part => part.MimeType == "text/plain");
-        if (plain != null) return SanitizeText(Decode(plain), "text/plain");
-        var html = parts.FirstOrDefault(part => part.MimeType == "text/html");
-        if (html != null) return SanitizeHtml(Decode(html));
-        return new SanitizedBody("", false, "none", []);
+        if (part?.Data == null) return new SanitizedBody("", part != null, part == null ? "none" : "unavailable", []);
+        var (text, capped) = Decode(part);
+        var result = part.MimeType == "text/html" ? SanitizeHtml(text) : SanitizeText(text, part.MimeType);
+        return capped ? result with { Truncated = true } : result;
     }
 
-    internal static string Decode(Part part)
+    public static SanitizedBody Unavailable(string source) => new("", true, "unavailable: " + source, []);
+
+    /// <summary>Base64url decode with the input capped first, so a huge part costs at most the cap.</summary>
+    internal static (string Text, bool Capped) Decode(Part part)
     {
+        var data = part.Data!;
+        // 4 base64 chars per 3 bytes; UTF-8 is at most 4 bytes per char, so this bounds the work.
+        var maxChars = (InputCap * 4 / 3 + 4) & ~3;
+        var capped = data.Length > maxChars;
+        if (capped) data = data[..maxChars];
         byte[] bytes;
         try
         {
-            var data = part.Data!.Replace('-', '+').Replace('_', '/');
+            data = data.Replace('-', '+').Replace('_', '/');
             data = data.PadRight(data.Length + (4 - data.Length % 4) % 4, '=');
             bytes = Convert.FromBase64String(data);
         }
-        catch (FormatException) { return ""; }
+        catch (FormatException) { return ("", false); }
         Encoding encoding = Encoding.UTF8;
         if (part.Charset != null)
         {
             try { encoding = Encoding.GetEncoding(part.Charset); }
             catch (ArgumentException) { }
         }
-        return encoding.GetString(bytes);
+        var text = encoding.GetString(bytes);
+        if (text.Length > InputCap) { text = text[..InputCap]; capped = true; }
+        return (text, capped);
     }
 
-    private static readonly Regex ScriptLike = new(
-        @"<(script|style|head|title|noscript|template|svg|iframe|object)\b[^>]*>.*?</\1\s*>",
-        RegexOptions.IgnoreCase | RegexOptions.Singleline | RegexOptions.Compiled);
-    private static readonly Regex Comments = new(@"<!--.*?-->", RegexOptions.Singleline | RegexOptions.Compiled);
-    private static readonly Regex Anchor = new(
-        @"<a\b[^>]*?\bhref\s*=\s*(?:""(?<h>[^""]*)""|'(?<h>[^']*)'|(?<h>[^\s>]+))[^>]*>(?<t>.*?)</a\s*>",
-        RegexOptions.IgnoreCase | RegexOptions.Singleline | RegexOptions.Compiled);
-    private static readonly Regex BlockBreak = new(
-        @"<(br|/p|/div|/tr|/li|/h[1-6]|/table|/blockquote|hr)\b[^>]*>", RegexOptions.IgnoreCase | RegexOptions.Compiled);
-    private static readonly Regex ListItem = new(@"<li\b[^>]*>", RegexOptions.IgnoreCase | RegexOptions.Compiled);
-    private static readonly Regex Tag = new(@"<[^>]*>", RegexOptions.Singleline | RegexOptions.Compiled);
     private static readonly Regex Url = new(
-        @"\b(?:https?://|www\.)[^\s<>""'\]\[(){}]+", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+        @"\b(?:https?://|www\.)[^\s<>""'\]\[(){}]+", RegexOptions.IgnoreCase | Linear, RegexTimeout);
     private static readonly Regex OtherScheme = new(
-        @"\b(?:javascript|data|vbscript|file):[^\s<>""']*", RegexOptions.IgnoreCase | RegexOptions.Compiled);
-    private const string LinkMarkerPrefix = "\u0001LINK";
+        @"\b(?:javascript|data|vbscript|file):[^\s<>""']*", RegexOptions.IgnoreCase | Linear, RegexTimeout);
+    private static readonly Regex HrefAttribute = new(
+        @"\bhref\s*=\s*(?:""[^""]*""|'[^']*'|[^\s""'>]+)", RegexOptions.IgnoreCase | Linear, RegexTimeout);
+    private static readonly Regex Spaces = new(@"[ \t\f\v]+", Linear, RegexTimeout);
+    private static readonly Regex LineEdges = new(@" *\n *", Linear, RegexTimeout);
+    private static readonly Regex BlankLines = new(@"\n{3,}", Linear, RegexTimeout);
+    private static readonly Regex Marker = new("\u0001LINK([0-9]+)\u0002", Linear, RegexTimeout);
+    private const string RemovedMarker = "\u0001LINKX\u0002";
+
+    private static readonly HashSet<string> RawTextTags = new(StringComparer.Ordinal)
+        { "script", "style", "head", "title", "noscript", "template", "svg", "iframe", "object", "textarea" };
+    private static readonly HashSet<string> BlockTags = new(StringComparer.Ordinal)
+        { "br", "p", "div", "tr", "li", "h1", "h2", "h3", "h4", "h5", "h6", "table", "blockquote", "hr", "ul", "ol" };
 
     public static SanitizedBody SanitizeHtml(string html)
     {
-        var links = new LinkCollector();
-        var text = Comments.Replace(html, " ");
-        text = ScriptLike.Replace(text, " ");
-        text = Anchor.Replace(text, match =>
+        try
         {
-            var href = WebUtility.HtmlDecode(match.Groups["h"].Value).Trim();
-            var anchorText = Clean(WebUtility.HtmlDecode(Tag.Replace(match.Groups["t"].Value, " ")));
-            var marker = links.Add(href, anchorText);
-            return $" {anchorText} {marker} ";
-        });
-        text = BlockBreak.Replace(text, "\n");
-        text = ListItem.Replace(text, "\n- ");
-        text = Tag.Replace(text, " ");
-        text = WebUtility.HtmlDecode(text);
-        return Finish(text, "text/html", links);
+            var links = new LinkCollector();
+            var text = WebUtility.HtmlDecode(HtmlToText(StripControls(Cut(html)), links));
+            return Finish(text, "text/html", links, html.Length > InputCap);
+        }
+        catch (RegexMatchTimeoutException) { return Unavailable("text/html"); }
     }
 
     public static SanitizedBody SanitizeText(string text, string source = "text/plain")
-        => Finish(text, source, new LinkCollector());
+    {
+        try { return Finish(StripControls(Cut(text)), source, new LinkCollector(), text.Length > InputCap); }
+        catch (RegexMatchTimeoutException) { return Unavailable(source); }
+    }
 
-    private static SanitizedBody Finish(string text, string source, LinkCollector links)
+    private static string Cut(string value) => value.Length > InputCap ? value[..InputCap] : value;
+
+    /// <summary>
+    /// Single linear pass over the markup. Comments and raw-text elements (script, style,
+    /// ...) are skipped, anchors become "text [link N]", block tags become newlines, all
+    /// other tags vanish. Every search for a terminator is memoized per needle and only
+    /// moves forward, so unterminated decoy tags cannot make the pass quadratic.
+    /// </summary>
+    internal static string HtmlToText(string html, LinkCollector links)
+    {
+        var output = new StringBuilder(Math.Min(html.Length, BodyCap * 4));
+        var finder = new ForwardFinder(html);
+        var anchorStart = -1;
+        string? anchorHref = null;
+        var i = 0;
+
+        void FlushAnchor()
+        {
+            if (anchorHref == null) return;
+            var raw = output.ToString(anchorStart, output.Length - anchorStart);
+            var marker = links.Add(anchorHref, Clean(WebUtility.HtmlDecode(raw)));
+            output.Append(' ').Append(marker).Append(' ');
+            anchorHref = null;
+        }
+
+        while (i < html.Length)
+        {
+            var next = html.IndexOf('<', i);
+            if (next < 0) { output.Append(html, i, html.Length - i); break; }
+            output.Append(html, i, next - i);
+            i = next;
+            if (string.CompareOrdinal(html, i, "<!--", 0, 4) == 0)
+            {
+                var end = finder.Next("-->", i + 4);
+                i = end < 0 ? html.Length : end + 3;
+                output.Append(' ');
+                continue;
+            }
+            var close = finder.Next(">", i + 1);
+            if (close < 0) break; // unterminated tag: the rest is markup, not text
+            var (name, closing) = TagName(html, i + 1, close);
+            var tagStart = i + 1;
+            i = close + 1;
+            if (name.Length == 0) { output.Append(' '); continue; }
+            if (!closing && RawTextTags.Contains(name))
+            {
+                var end = finder.Next("</" + name, i);
+                if (end < 0) { i = html.Length; break; }
+                var endClose = finder.Next(">", end);
+                i = endClose < 0 ? html.Length : endClose + 1;
+                output.Append(' ');
+                continue;
+            }
+            if (name == "a")
+            {
+                FlushAnchor();
+                if (!closing && Href(html, tagStart, close) is { } href)
+                {
+                    anchorHref = href;
+                    anchorStart = output.Length;
+                }
+                output.Append(' ');
+                continue;
+            }
+            if (name == "li" && !closing) output.Append("\n- ");
+            else output.Append(BlockTags.Contains(name) ? '\n' : ' ');
+        }
+        FlushAnchor();
+        return output.ToString();
+    }
+
+    private static (string Name, bool Closing) TagName(string html, int start, int end)
+    {
+        var i = start;
+        var closing = i < end && html[i] == '/';
+        if (closing) i++;
+        var nameStart = i;
+        while (i < end && i - nameStart < 16 && char.IsAsciiLetterOrDigit(html[i])) i++;
+        return (html[nameStart..i].ToLowerInvariant(), closing);
+    }
+
+    private static string? Href(string html, int start, int end)
+    {
+        var match = HrefAttribute.Match(html, start, end - start);
+        if (!match.Success) return null;
+        var value = match.Value[(match.Value.IndexOf('=') + 1)..].Trim().Trim('"', '\'');
+        return WebUtility.HtmlDecode(value).Trim();
+    }
+
+    /// <summary>First occurrence of a needle at or after a position; positions only move forward.</summary>
+    private sealed class ForwardFinder(string text)
+    {
+        private readonly Dictionary<string, (int From, int Found)> _cache = new(StringComparer.Ordinal);
+
+        public int Next(string needle, int from)
+        {
+            if (_cache.TryGetValue(needle, out var hit) && hit.From <= from && (hit.Found < 0 || hit.Found >= from))
+                return hit.Found;
+            var found = text.IndexOf(needle, from, StringComparison.OrdinalIgnoreCase);
+            _cache[needle] = (from, found);
+            return found;
+        }
+    }
+
+    private static SanitizedBody Finish(string text, string source, LinkCollector links, bool inputCapped)
     {
         // Bare URLs in text (and any that survived HTML conversion) are lifted out too.
         text = Url.Replace(text, match =>
@@ -216,17 +372,34 @@ public static class MailMessageParser
         });
         text = OtherScheme.Replace(text, "[link removed]");
         text = StripInvisible(text).Replace(' ', ' ').Replace(' ', ' ').Replace(' ', ' ');
-        text = Regex.Replace(text, @"[ \t\f\v]+", " ");
-        text = Regex.Replace(text, @" *\n *", "\n");
-        text = Regex.Replace(text, @"\n{3,}", "\n\n").Trim();
-        text = Regex.Replace(text, LinkMarkerPrefix + @"(\d+)\u0002", m => $"[link {m.Groups[1].Value}]");
-        text = text.Replace(LinkMarkerPrefix + "X\u0002", "[link removed]");
-        var truncated = text.Length > BodyCap;
-        if (truncated) text = text[..BodyCap];
+        text = Spaces.Replace(text, " ");
+        text = LineEdges.Replace(text, "\n");
+        text = BlankLines.Replace(text, "\n\n").Trim();
+        text = Marker.Replace(text, m => $"[link {m.Groups[1].Value}]");
+        text = text.Replace(RemovedMarker, "[link removed]");
+        var truncated = inputCapped || text.Length > BodyCap;
+        if (text.Length > BodyCap) text = text[..BodyCap];
         return new SanitizedBody(text, truncated, source, links.Items);
     }
 
-    /// <summary>Removes control, zero-width, and bidi-override characters (except newline/tab).</summary>
+    /// <summary>
+    /// Input hygiene before any marker is inserted: removes every C0/C1 control character
+    /// except tab and newline (CR is normalized), so the U+0001/U+0002 link markers used
+    /// internally cannot be spoofed by message content.
+    /// </summary>
+    internal static string StripControls(string text)
+    {
+        var builder = new StringBuilder(text.Length);
+        foreach (var c in text.Replace("\r\n", "\n"))
+        {
+            if (c is '\n' or '\t') builder.Append(c);
+            else if (c == '\r') builder.Append('\n');
+            else if (!char.IsControl(c)) builder.Append(c);
+        }
+        return builder.ToString();
+    }
+
+    /// <summary>Removes control, zero-width, and bidi-override characters (except newline/tab and Mail's own markers).</summary>
     internal static string StripInvisible(string text)
     {
         var builder = new StringBuilder(text.Length);
@@ -242,16 +415,27 @@ public static class MailMessageParser
     }
 
     private static string Clean(string value)
-        => Regex.Replace(StripInvisible(value).Replace('\n', ' '), @"\s+", " ").Trim();
+    {
+        var builder = new StringBuilder(Math.Min(value.Length, 4096));
+        var space = false;
+        foreach (var c in StripInvisible(StripControls(value)))
+        {
+            if (char.IsWhiteSpace(c)) { space = builder.Length > 0; continue; }
+            if (space) { builder.Append(' '); space = false; }
+            builder.Append(c);
+        }
+        return builder.ToString();
+    }
 
     internal static string? Cap(string? value, int max)
     {
         if (value == null) return null;
+        if (value.Length > max * 8) value = value[..(max * 8)];
         value = Clean(value);
         return value.Length <= max ? value : value[..(max - 1)] + "…";
     }
 
-    private sealed class LinkCollector
+    internal sealed class LinkCollector
     {
         private readonly List<MailLink> _items = [];
         private readonly Dictionary<string, int> _byHref = new(StringComparer.Ordinal);
@@ -263,7 +447,7 @@ public static class MailMessageParser
             if (href.Length > 2048
                 || !Uri.TryCreate(href, UriKind.Absolute, out var uri)
                 || uri.Scheme is not ("http" or "https"))
-                return LinkMarkerPrefix + "X\u0002";
+                return RemovedMarker;
             var normalized = uri.AbsoluteUri;
             var anchor = string.IsNullOrWhiteSpace(text) ? null : Cap(text, 200);
             if (_byHref.TryGetValue(normalized, out var existing))
@@ -271,13 +455,13 @@ public static class MailMessageParser
                 var current = _items[existing - 1];
                 if (current.Text == null && anchor != null && anchor != normalized)
                     _items[existing - 1] = current with { Text = anchor };
-                return LinkMarkerPrefix + existing + "\u0002";
+                return "\u0001LINK" + existing + "\u0002";
             }
-            if (_items.Count >= LinkCap) return LinkMarkerPrefix + "X\u0002";
+            if (_items.Count >= LinkCap) return RemovedMarker;
             var index = _items.Count + 1;
             _items.Add(new MailLink(index, normalized, anchor == normalized ? null : anchor));
             _byHref[normalized] = index;
-            return LinkMarkerPrefix + index + "\u0002";
+            return "\u0001LINK" + index + "\u0002";
         }
     }
 }
