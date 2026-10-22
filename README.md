@@ -38,7 +38,13 @@ The kernel owns `/settings`, `/enable` and `/disable`. Start at `GET /` or `GET 
 How message bodies are sanitized:
 - `text/plain` is preferred. Otherwise HTML is converted to text, with scripts, styles, heads and comments removed.
 - Every URL is lifted out of the body into `links[]` (`{index, href, text}`, http(s) only, deduplicated, at most 50). The body shows `[link N]` where each link was.
-- Zero-width and bidi control characters are stripped, and the body is capped at 20 000 characters with a `truncated` flag.
+- Control, zero-width and bidi characters are stripped (before any internal link marker is inserted), and the body is
+  capped at 20 000 characters with a `truncated` flag.
+- Hostile-input budget: a decoded part is capped at 512 KB before processing. HTML goes through one linear pass, and
+  every regex is non-backtracking with a 250 ms timeout. A timeout returns an empty body marked unavailable and
+  truncated.
+- Gmail can externalize a large body part (`body.attachmentId`, no `data`, no filename). Mail fetches it with
+  `messages.attachments.get` when it is at most 2 MB, then applies the same caps.
 
 Agents use the `mail` skill (`seeds/skills/mail/SKILL.md`).
 
@@ -48,7 +54,8 @@ The caller filter is modeled on Body's `BodyCaller` and reads only host-validate
 
 - LocalDefault and anonymous principals are rejected, and `sub` must be a GUID.
 - **Owner routes** (settings, OAuth, disconnect) accept only a plain user session (no execution token) of the
-  configured owner. The first owner session that configures Mail becomes its owner.
+  configured owner. The first claim is atomic (compare-and-set on the config revision) and requires the host
+  `admin` role; after that, only the owner passes.
 - **Reader routes** also accept an execution token, but only if all of the following hold:
   - beneficiary = owner = `sub`;
   - app is `nova` and the actor is the **bound agent** entity;
@@ -64,8 +71,18 @@ The caller filter is modeled on Body's `BodyCaller` and reads only host-validate
 
 ## Privacy model
 
-- **Stored:** message *metadata* only, in the confidential record stream `mail:messages` with 30-day retention.
-  Each record holds id, threadId, from, to, subject, date, labelIds and Gmail's snippet, written once per message id. Message bodies are never persisted.
+- **Stored:** no message content. Kernel stream reads (`GET /api/streams/mail:messages/records`) are not bound by
+  Mail's caller policy, so each record holds only id, threadId, labelIds and internalDate. Records are written once per
+  message id and parented to the confidential `mail-account` entity, so the kernel also filters them by that entity's
+  owner/agent. They have 30-day retention and are deleted on disconnect or when a different mailbox is connected.
+  Search, metadata and bodies are always read live from Gmail. The sender and subject a LIVE notice quotes are held in
+  plugin memory only. Message bodies are never persisted.
+- **Configuration entities:** `mail-config` and `mail-account` are kernel-confidential (`confidential`, `owner_id`,
+  `owner_agent_id`). The kernel hides them from entity lists and lets only the human owner or an owning-agent execution
+  read or change them, so LocalDefault and other admins are refused. The kernel does not restrict *what* the owner or
+  owning agent writes, so Mail derives authorization from `owner_id`/`owner_agent_id`, requires them to match its own
+  copies, and pins the binding in memory. An out-of-band change is reverted; an inconsistent binding at startup refuses
+  every caller (`mail_binding_untrusted`).
 - **Secrets:** `client_id`, `client_secret` and `refresh_token` are entity fields of type `secret`. They are never
   returned over HTTP and never logged. Access tokens live only in memory and are refreshed under a semaphore
   five minutes before expiry. `last_error` holds only our own text and OAuth error codes, never response
@@ -82,6 +99,8 @@ The caller filter is modeled on Body's `BodyCaller` and reads only host-validate
     - More than three in one poll coalesce into one notice ("5 new mails") that quotes the first three.
     - Backfill and resync never notify.
     - Idempotency key: `mail:new:<messageId>`.
+  - **Delivery:** notices use `ConfidentialOnly` disclosure, so Nova delivers them only into a *confidential* LIVE
+    discussion. A non-confidential LIVE silently receives none.
   - **Health:** one notice when access needs reconnecting and one when it recovers. Key:
     `mail:health:<accountId>:<status>:<n>`.
 
@@ -89,7 +108,7 @@ The caller filter is modeled on Body's `BodyCaller` and reads only host-validate
 
 The poller starts from `OnStartupAsync`, which the host runs only for an enabled plugin, and stays dormant until an
 account is connected.
-- **First connect:** records the current `historyId` and backfills 14 days of metadata
+- **First connect:** records the current `historyId` and backfills 14 days of message ids
   (`messages.list` + batched `messages.get format=metadata`) without LIVE notices.
 - **Every 2 minutes:** `users.history.list` (messageAdded) from the stored `history_id`.
 - **History expired (404),** or more than 1000 new ids at once: resyncs 14 days, then resets `history_id` from
@@ -111,14 +130,14 @@ During consent Google warns that the app is unverified: choose Advanced → cont
 
 Consent uses the authorization-code flow:
 - PKCE S256, `access_type=offline`, `prompt=consent`, and a 256-bit random `state` that is verified in constant time and is single-use.
-- The redirect goes to an ephemeral `HttpListener` on `http://127.0.0.1:<random free port>/`, which exists only while an attempt is pending and is disposed after 10 minutes. No public callback route is involved.
+- The redirect goes to an ephemeral socket bound to `IPAddress.Loopback` on an OS-assigned port (`http://127.0.0.1:<port>/`), with no http.sys, no URL ACL and no Host-header matching. It exists only while an attempt is pending and is closed after 10 minutes. If the socket cannot be opened, the attempt continues in paste-only mode. No public callback route is involved.
 - If the browser was on another device, paste the full `http://127.0.0.1:…` address it ended on into the panel. The state is verified there too.
 
 ## Build and test
 
 ```powershell
-dotnet build src/Leaf.Plugins.Mail/Leaf.Plugins.Mail.csproj   # sibling ../redleaf or -p:LeafSdkProject=<path>
-dotnet test tests/Leaf.Plugins.Mail.Tests/Leaf.Plugins.Mail.Tests.csproj
+dotnet build    # leaf-mail.sln; sibling ../redleaf or -p:LeafSdkProject=<path>
+dotnet test
 
 cd web
 pnpm install
