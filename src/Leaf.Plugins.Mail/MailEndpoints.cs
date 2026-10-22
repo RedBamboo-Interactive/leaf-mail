@@ -97,7 +97,15 @@ internal static class MailEndpoints
                 items = agents
                     .Where(a => !MailData.Boolean(a.Data, "confidential")
                         || string.Equals(MailData.String(a.Data, "owner_id"), caller.UserId, StringComparison.OrdinalIgnoreCase))
-                    .Select(a => new { id = a.Id, slug = a.Slug, name = a.Name })
+                    .Select(a => new
+                    {
+                        id = a.Id,
+                        slug = a.Slug,
+                        name = a.Name,
+                        // Same-origin asset paths only; the picker renders them as the card avatar.
+                        avatar = SameOriginPath(MailData.String(a.Data, "avatar_url") ?? MailData.String(a.Data, "avatar")),
+                        confidential = MailData.Boolean(a.Data, "confidential"),
+                    })
                     .ToArray(),
             });
         });
@@ -170,6 +178,9 @@ internal static class MailEndpoints
             return Results.Ok(await service.DisconnectAsync(c.RequestAborted));
         });
     }
+
+    private static string? SameOriginPath(string? value)
+        => value is { Length: > 1 and <= 512 } && value[0] == '/' && value[1] != '/' && !value.Contains('\\') ? value : null;
 
     private static MailCaller OwnerUser(HttpContext c)
     {

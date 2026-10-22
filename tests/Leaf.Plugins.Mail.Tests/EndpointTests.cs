@@ -29,7 +29,15 @@ public sealed class EndpointTests : IAsyncLifetime
         {
             ["discussion_id"] = "disc-private-1", ["app"] = "nova", ["owner_id"] = Harness.Owner, ["agent"] = Harness.Agent,
         });
-        _h.Entities.Add("agent", "nova", new JsonObject());
+        _h.Entities.Add("agent", "nova", new JsonObject { ["avatar_url"] = "/api/assets/nova.png" });
+        _h.Entities.Add("agent", "private-owned", new JsonObject
+        {
+            ["confidential"] = true, ["owner_id"] = Harness.Owner, ["avatar"] = "https://tracker.example/p.png",
+        });
+        _h.Entities.Add("agent", "private-other", new JsonObject
+        {
+            ["confidential"] = true, ["owner_id"] = "33333333-3333-3333-3333-333333333333",
+        });
         _host = await new HostBuilder().ConfigureWebHost(web => web.UseTestServer()
             .ConfigureServices(services =>
             {
@@ -143,6 +151,21 @@ public sealed class EndpointTests : IAsyncLifetime
         Assert.Equal(HttpStatusCode.OK, off.StatusCode);
         Assert.Equal(LiveApproval.Off, await _h.Store.GetLiveApprovalAsync());
         Assert.Equal(HttpStatusCode.BadRequest, (await Send(HttpMethod.Put, "/config", "owner", """{"live_approved":"yes"}""")).StatusCode);
+    }
+
+    [Fact]
+    public async Task Agents_lists_the_owners_confidential_agents_with_same_origin_avatars_only()
+    {
+        var response = await Send(HttpMethod.Get, "/agents", "owner");
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var items = JsonNode.Parse(await response.Content.ReadAsStringAsync())!["items"]!.AsArray()
+            .ToDictionary(i => i!["slug"]!.GetValue<string>(), i => i!.AsObject());
+        Assert.Equal(["nova", "private-owned"], items.Keys.Order());
+        Assert.Equal("/api/assets/nova.png", items["nova"]["avatar"]!.GetValue<string>());
+        Assert.False(items["nova"]["confidential"]!.GetValue<bool>());
+        Assert.True(items["private-owned"]["confidential"]!.GetValue<bool>());
+        Assert.Null(items["private-owned"]["avatar"]); // off-origin avatar is not passed to the browser
+        Assert.Equal(HttpStatusCode.Forbidden, (await Send(HttpMethod.Get, "/agents", "agent")).StatusCode);
     }
 
     [Fact]
