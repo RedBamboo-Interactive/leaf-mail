@@ -46,7 +46,57 @@ How message bodies are sanitized:
 - Gmail can externalize a large body part (`body.attachmentId`, no `data`, no filename). Mail fetches it with
   `messages.attachments.get` when it is at most 2 MB, then applies the same caps.
 
-Agents use the `mail` skill (`seeds/skills/mail/SKILL.md`).
+Agents use the `mail` skill (`seeds/skills/mail/SKILL.md`). Binding an agent in Settings → Mail adds that skill to the
+agent's `skills`; unbinding or switching removes it from the previous agent. See [Skill assignment](#skill-assignment).
+
+### Attachments
+
+| Route | Purpose |
+|---|---|
+| `GET /messages/{id}/attachments` | `attachmentId`, `filename`, `mimeType`, `size`, `inline` (inline images are flagged) |
+| `GET /messages/{id}/attachments/{attachmentId}/text` | Live text extraction, reviewed by the Sentinel |
+
+They follow the same caller policy as `/messages`.
+
+- **Supported types:** `application/pdf`, `text/plain`, `text/csv`, `text/html`, `text/calendar` (.ics, unfolded into
+  readable lines) and `message/rfc822` (headers + text body). A generic `application/octet-stream` is refined by the PDF
+  magic bytes or the file extension. Every other type is `unsupported`.
+- **Statuses:** `ok`, `unsupported`, `unreadable` (malformed, or encrypted / password-protected), `no_text` (e.g. an
+  image-only PDF; there is no OCR) and `too_large`.
+- **Limits:**
+  - **Download:** 15 MB, checked against Gmail's part size first and enforced again while reading the response.
+    Personal Gmail caps attachments at 25 MB.
+  - **PDF:** 300 pages and a 10 s budget.
+  - **Text:** capped at 20 000 characters, with `truncated`.
+- **Nothing is executed, rendered, or opened by an external program.** Bytes and text exist only in memory for the
+  request and are cleared afterwards; nothing is written to records, entities, or disk.
+- **Libraries:** [PdfPig](https://github.com/UglyToad/PdfPig) 0.1.16 (Apache-2.0) for PDF text, and
+  [MimeKitLite](https://www.mimekit.net/) 4.18.1 (MIT) for message/rfc822. Neither has dependencies on net9.0.
+
+### Sentinel review
+
+Every message body (`/messages/{id}`, `/threads/{id}`) and every attachment text is reviewed by the shared Sentinel
+(`IUntrustedContentReview`, capability `sentinel`), with source `mail` or `attachment` (and `Format = Html` for HTML).
+
+- **Attribution and compute:** the review job is attributed to the verified caller: app Mail, actor the bound agent or
+  the owner, beneficiary the owner, plus the private discussion and the mail item. Compute comes from the Sentinel's
+  own configuration and the bound agent; Mail never names a provider.
+- **What a review returns:**
+  - **Content** is the Sentinel's `VisibleContent`: hidden HTML and invisible characters removed, then sanitized as
+    before.
+  - **`links[]`** come from the visible content only. Links that occur only in hidden regions are returned separately
+    in `hiddenLinks[]`, flagged `hidden: true`. The hidden text itself is never returned; only a segment count is.
+  - **`sentinel`** is `{ available, risk, signals, handling, isolation, screening, reason?, jobId? }`.
+- **Soft dependency:** Mail never `requires` the capability. Without cap-sentinel, content is returned as before with
+  `sentinel.available=false` (`reason: not_installed`).
+- **Budgets:** there is one review per item per request, and `/threads` reviews at most 3 messages concurrently. A
+  request has a 60 s review budget. Items still pending when it runs out keep their content, fall back to the
+  Sentinel's model-free screening (which still strips hidden text), and report `available=false` with
+  `reason: timeout`; a failing review reports `reason: error`. The request itself never fails because of the Sentinel.
+- **Next step:** Sentinel *extraction* (a bounded, validated `?extract=` schema for receipts, bookings and delivery
+  notices) is the next step for automations; it is not part of this slice.
+
+Mail's `kernelApi` is `^0.1.2`, the first kernel API that ships `IUntrustedContentReview`.
 
 ## Who can call it
 
@@ -82,6 +132,24 @@ The caller filter is modeled on Body's `BodyCaller` and reads only host-validate
   records through `POST /api/streams/mail:messages/records` with chosen `external_id`s. Mail dedupes on that id, so it
   would treat those messages as already seen and send no LIVE notice for them. No content is exposed, and search and
   reads are unaffected.
+
+## Skill assignment
+
+`PUT /config { agent_id }` (owner session only) keeps the bound agent's `skills` in step with the binding:
+
+- binding adds Mail's own `mail` agent-skill (the seeded skill owned by the Mail plugin, not any skill that merely
+  happens to be named `mail`);
+- switching agents removes it from the previous agent; unbinding removes it.
+
+It is idempotent: a skill already present by id or slug counts as present, and only references to that one skill are
+ever added or removed. The response reports each agent as `added`, `already_present`, `removed`, `not_present`,
+`agent_missing`, `skill_missing`, `manual_required` or `failed`. The binding itself never fails because of this.
+
+The write goes through the kernel's plugin-scoped entity store, which validates and versions it. It runs only on the
+owner's verified request, and only for an agent the owner may see (the same rule as `GET /agents`). It patches the
+`skills` key alone, so the agent's ownership stamp never changes, and the agent is re-read immediately before
+writing. The kernel refuses this write for an agent owned by another plugin; that case is reported as
+`manual_required`, and the owner adds the skill in the agent editor.
 
 ## Privacy model
 
