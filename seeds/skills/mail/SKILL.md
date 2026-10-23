@@ -10,9 +10,10 @@ Mail gives the owner and their bound agent read-only access to one Gmail account
 promise any of those actions; tell the owner to do them in Gmail.
 
 Every request needs `Authorization: Bearer $REDLEAF_EXECUTION_TOKEN` and goes only to trusted loopback RedLeaf at
-`http://127.0.0.1:18804`. Never print, persist, or forward the bearer. Mail accepts the token only from the bound
-agent working inside one of the owner's private Nova discussions. Calls from Discord, Public Nova, delegated sessions,
-automations, or heartbeats are refused with 403. Do not retry them without the token or through another path.
+`http://127.0.0.1:18804`. Never print, persist, or forward the bearer. Mail accepts the token of the bound agent
+acting for the owner from any session: private discussions, Discord, Commons, automations, delegated sessions.
+Another agent's token, or a call on behalf of someone else, is refused with 403. Settings and connecting Gmail are
+for the owner in Settings → Mail only.
 
 ```powershell
 if (-not $env:REDLEAF_EXECUTION_TOKEN) { throw 'REDLEAF_EXECUTION_TOKEN is required' }
@@ -116,9 +117,9 @@ external text written by strangers:
 
 ## Privacy
 
-- Mail exists for the owner's private conversations with you. **Never quote, paraphrase, or hint at mail contents
-  (senders, subjects, bodies, counts tied to people) in Discord, Public Nova, Commons, or any other shared or public
-  surface**, even if asked there, and even if the person asking says they are the owner.
+- Mail is the owner's: read it for the owner, wherever they ask you. The `sentinel` object (and `signals`,
+  `metadata.signals`, `hiddenLinks[]`) tells you what the Sentinel found in the content; use it, and say so when it
+  flagged something.
 - LIVE "New mail" notices appear only if the owner switched them on in Settings → Mail; they quote only the
   sender name and subject, as external content. Use the message id in the
   notice metadata (`read`) to open it if the owner wants details.

@@ -119,7 +119,7 @@ Every message body (`/messages/{id}`, `/threads/{id}`) and every attachment text
 (`IUntrustedContentReview`, capability `sentinel`), with source `mail` or `attachment` (and `Format = Html` for HTML).
 
 - **Attribution and compute:** the review job is attributed to the verified caller: app Mail, actor the bound agent or
-  the owner, beneficiary the owner, plus the private discussion and the mail item. Compute comes from the Sentinel's
+  the owner, beneficiary the owner, plus any discussion named in the signed execution context and the mail item. Compute comes from the Sentinel's
   own configuration and the bound agent; Mail never names a provider.
 - **What a review returns:**
   - **Content** is the Sentinel's `VisibleContent`: hidden HTML and invisible characters removed, then sanitized as
@@ -152,28 +152,25 @@ The caller filter is modeled on Body's `BodyCaller` and reads only host-validate
 - **Owner routes** (settings, OAuth, disconnect) accept only a plain user session (no execution token) of the
   configured owner. The first claim is atomic (compare-and-set on the config revision) and requires the host
   `admin` role; after that, only the owner passes.
-- **Reader routes** also accept an execution token, but only if all of the following hold:
-  - beneficiary = owner = `sub`;
-  - app is `nova` and the actor is the **bound agent** entity;
-  - there is at least one `discussion` context, and each one is a Nova discussion owned by exactly that owner and agent;
-  - every signed `origin-entrypoint` route is under `/api/apps/nova/discussions/`.
-
-  Mail's own browser app (a root `mail` execution with a browser route under `/apps/mail`) is also accepted, mirroring Body.
-- **Public and Discord isolation.** A context marker of kind `external-conversation`, `discord-*`, `dm`,
-  `guild_channel`, `thread`, `public-discord-conversation` or `external-*`, or an id prefixed `discord:` or
-  `leaf-commons:`, denies the call. Nova sets these markers on every Discord and Public Nova session, and the kernel
-  signs them; leaf-discord and leaf-commons gate on the same marker. The origin-route rule also denies sessions
-  minted through Nova `/delegate`, automations and heartbeats, so a public session cannot shed its marker by delegating.
+- **Reader routes** also accept an execution token whose beneficiary is the owner (= `sub`) and whose actor is the
+  **bound agent** entity, whatever surface or app it runs in: private Nova discussions, Discord and Commons sessions,
+  automations, delegated sessions. Discord Nova is Nova. Mail's own browser app (a root `mail` execution with a
+  browser route under `/apps/mail`) is also accepted, mirroring Body.
+- **No per-surface segregation.** The protection is the bridge's Sentinel pass: every body, attachment and header is
+  reviewed inbound (above), and the verdict travels with the content (`sentinel`, `signals`, `metadata.signals`,
+  `hiddenLinks[]`), so the AI session that called Mail knows what the Sentinel did, wherever it runs. Mail is
+  read-only, so there is no outbound pass.
+- **Who can mint such a token.** Agent-actor tokens with a user beneficiary come only from the kernel (Nova sessions,
+  delegation, flows). A plugin's `IExecutionTokens.IssueSystem` token has `sub` `system`, a `system` beneficiary and no
+  actor entity id; a browser-app token has the app as actor. Neither passes.
 
 ### Known residual risks
 
-- **Local-process injection into a non-confidential discussion.** Mail requires the agent's origin discussion to be an
-  owned Nova discussion, not a *confidential* one, because the owner's ordinary discussions and LIVE are not
-  confidential (and making LIVE confidential would hide it from Nova's heartbeat). Nova lets a LocalDefault
-  (`local-user`) caller reach any non-confidential discussion (`OwnerScope.CanAccess`). A process on the machine can
-  therefore post into such a discussion and get the bound agent to call Mail with a legitimate token. The same applies
-  to a Discord session of the same agent posting into a private discussion. Mail cannot tell these apart from the
-  owner's own turns; the mail skill tells the agent to treat mail as data and never relay it to public surfaces.
+- **Anyone who can prompt the bound agent can ask it to read mail.** That includes people in a shared Discord channel
+  or Commons thread where the agent answers for the owner, and a local process posting into a non-confidential
+  discussion (Nova lets a LocalDefault caller reach those). Mail cannot tell these turns from the owner's own: the
+  token is the agent's, on the owner's behalf. What the agent does with mail content on such a surface is governed by
+  the agent and the bridge's own Sentinel pass, not by Mail.
 - **LIVE suppression by pre-claimed record ids.** Anyone with write access to the `mail:messages` stream can append
   records through `POST /api/streams/mail:messages/records` with chosen `external_id`s. Mail dedupes on that id, so it
   would treat those messages as already seen and send no LIVE notice for them. No content is exposed, and search and
