@@ -20,6 +20,8 @@ public sealed record MailMetadata(
     IReadOnlyList<string> LabelIds,
     string? Snippet)
 {
+    /// <summary>From, Subject and snippet as Gmail sent them, before cleaning; screened, never returned.</summary>
+    public (string? From, string? Subject, string? Snippet) Raw { get; init; }
 
     /// <summary>
     /// The only shape written to kernel records: no sender, recipient, subject, or snippet.
@@ -33,7 +35,13 @@ public sealed record MailMetadata(
         ["internalDate"] = Date?.ToUnixTimeMilliseconds(),
     };
 
-    public JsonObject ToJson() => new()
+    /// <param name="includeSnippet">False when a body is returned: Gmail's snippet can carry
+    /// hidden preheader text the Sentinel never saw.</param>
+    public JsonObject ToJson(bool includeSnippet = true) => includeSnippet ? Full() : WithoutSnippet(Full());
+
+    private static JsonObject WithoutSnippet(JsonObject json) { json.Remove("snippet"); return json; }
+
+    private JsonObject Full() => new()
     {
         ["id"] = Id,
         ["threadId"] = ThreadId,
@@ -66,6 +74,25 @@ public static class MailMessageParser
     public const int InputCap = 512 * 1024;
     public const int MaxFilenameLength = 255;
 
+    /// <summary>The untrusted display fields as Gmail sent them, before cleaning, for screening.</summary>
+    public static (string? From, string? Subject, string? Snippet) RawFields(JsonElement message)
+    {
+        var headers = Headers(message.TryGetProperty("payload", out var payload) ? payload : default);
+        var snippet = message.TryGetProperty("snippet", out var s) ? WebUtility.HtmlDecode(s.GetString() ?? "") : null;
+        return (headers.GetValueOrDefault("from"), headers.GetValueOrDefault("subject"), snippet);
+    }
+
+    /// <summary>True if the text holds characters <see cref="StripInvisible"/> would remove.</summary>
+    public static bool HasInvisible(string text)
+    {
+        foreach (var c in text)
+            if ((char.IsControl(c) && c is not ('\n' or '\r' or '\t')) || IsInvisible(c) || char.IsSurrogate(c) && c == '\uDB40')
+                return true;
+        for (var i = 0; i + 1 < text.Length; i++)
+            if (char.IsHighSurrogate(text[i]) != char.IsLowSurrogate(text[i + 1]) && (char.IsHighSurrogate(text[i]) || char.IsLowSurrogate(text[i + 1])))
+                return true;
+        return false;
+    }
     private const int HeaderCap = 512;
     private const int SnippetCap = 400;
     private static readonly TimeSpan RegexTimeout = TimeSpan.FromMilliseconds(250);
@@ -93,7 +120,10 @@ public static class MailMessageParser
             Cap(headers.GetValueOrDefault("subject"), HeaderCap),
             date,
             labels,
-            Cap(snippet, SnippetCap));
+            Cap(snippet, SnippetCap))
+        {
+            Raw = (headers.GetValueOrDefault("from"), headers.GetValueOrDefault("subject"), snippet),
+        };
     }
 
     public static Dictionary<string, string> Headers(JsonElement payload)

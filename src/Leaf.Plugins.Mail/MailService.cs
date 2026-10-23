@@ -365,8 +365,17 @@ public sealed class MailService(
             ["note"] = UntrustedNote,
             ["query"] = query,
             ["count"] = metadata.Count,
-            ["items"] = new JsonArray(metadata.Select(m => (JsonNode)m.ToJson()).ToArray()),
+            ["items"] = new JsonArray(metadata.Select(m => (JsonNode)MetadataJson(m, includeSnippet: true)).ToArray()),
         };
+    }
+
+    /// <summary>Metadata with field-level screening signals. The snippet is dropped whenever a
+    /// body is returned: it can carry hidden preheader text the body review removes.</summary>
+    private JsonObject MetadataJson(MailMetadata metadata, bool includeSnippet)
+    {
+        var json = metadata.ToJson(includeSnippet);
+        if (sentinel.ScreenFields(metadata, includeSnippet) is { } signals) json["signals"] = signals;
+        return json;
     }
 
     public async Task<JsonObject> MessageAsync(string id, MailCaller caller, CancellationToken ct)
@@ -434,7 +443,7 @@ public sealed class MailService(
             result = ContentJson(reviewed);
             result["bodySource"] = part.MimeType;
         }
-        result["metadata"] = metadata.ToJson();
+        result["metadata"] = MetadataJson(metadata, includeSnippet: false);
         result["body"] = result["text"]!.DeepClone();
         result.Remove("text");
         return result;

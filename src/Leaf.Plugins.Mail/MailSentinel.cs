@@ -123,6 +123,47 @@ public sealed class MailSentinel(IUntrustedContentReview? review, ILogger<MailSe
         return new ReviewedContent(body, hidden, sentinel);
     }
 
+    private const int MaxScreenedFieldLength = 8 * 1024;
+
+    /// <summary>
+    /// Screens the untrusted header fields (from, subject and, when returned, snippet) with the
+    /// model-free pre-pass. The values themselves are already cleaned of invisible characters by
+    /// the parser; this flags what was there: <c>invisible-characters</c>, the Sentinel's hidden
+    /// content signals, and injection pattern signals. Null when nothing was found.
+    /// </summary>
+    public JsonObject? ScreenFields(MailMetadata metadata, bool includeSnippet)
+    {
+        var result = new JsonObject();
+        void One(string name, string? raw)
+        {
+            var signals = ScreenField(raw);
+            if (signals.Count > 0) result[name] = new JsonArray(signals.Select(x => (JsonNode)JsonValue.Create(x)).ToArray());
+        }
+        One("from", metadata.Raw.From);
+        One("subject", metadata.Raw.Subject);
+        if (includeSnippet) One("snippet", metadata.Raw.Snippet);
+        return result.Count > 0 ? result : null;
+    }
+
+    public IReadOnlyList<string> ScreenField(string? raw)
+    {
+        if (string.IsNullOrEmpty(raw)) return [];
+        if (raw.Length > MaxScreenedFieldLength) raw = raw[..MaxScreenedFieldLength];
+        var signals = new List<string>();
+        if (MailMessageParser.HasInvisible(raw)) signals.Add("invisible-characters");
+        if (review != null)
+        {
+            try
+            {
+                var screening = review.Screen(raw, UntrustedContentFormat.Text);
+                foreach (var signal in screening.HiddenContentSignals.Concat(screening.InjectionSignals))
+                    if (!signals.Contains(signal)) signals.Add(signal);
+            }
+            catch (Exception ex) when (ex is not OutOfMemoryException) { signals.Add("screening-unavailable"); }
+        }
+        return signals;
+    }
+
     /// <summary>True when the screening actually looked at <paramref name="input"/>.</summary>
     internal static bool Screened(UntrustedContentScreening screening, string input)
         => !screening.InjectionSignals.Contains(UntrustedContentScreening.ContentTooLargeSignal)

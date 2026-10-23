@@ -163,7 +163,7 @@ public sealed class SentinelTests
         Assert.False(result["sentinel"]!["available"]!.GetValue<bool>());
         Assert.Equal("timeout", result["sentinel"]!["reason"]!.GetValue<string>());
         Assert.Equal("Your parcel is ready. Track it [link 1]", result["body"]!.GetValue<string>());
-        Assert.Equal(1, review.ScreenCalls); // model-free pre-pass as the fallback
+        Assert.Single(review.Screened, c => c.Contains("Your parcel is ready")); // model-free pre-pass as the body fallback
     }
 
     [Fact]
