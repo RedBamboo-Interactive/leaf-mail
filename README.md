@@ -53,8 +53,13 @@ agent's `skills`; unbinding or switching removes it from the previous agent. See
 
 | Route | Purpose |
 |---|---|
-| `GET /messages/{id}/attachments` | `attachmentId`, `filename`, `mimeType`, `size`, `inline` (inline images are flagged) |
-| `GET /messages/{id}/attachments/{attachmentId}/text` | Live text extraction, reviewed by the Sentinel |
+| `GET /messages/{id}/attachments` | `partId`, `attachmentId`, `filename`, `mimeType`, `size`, `inline` (inline images are flagged) |
+| `GET /messages/{id}/attachments/{partId}/text` | Live text extraction, reviewed by the Sentinel |
+
+Attachments are keyed on the stable `partId`, which is part of the message structure. Gmail's `attachmentId` is not
+documented as stable and is observed to change between `messages.get` calls, so the current one is re-read from a
+fresh fetch before every download. An `attachmentId` from the same fetch is still accepted. Filenames are cleaned of
+control, bidi and invisible characters and capped at 255 characters everywhere, including job provenance.
 
 They follow the same caller policy as `/messages`.
 
@@ -66,7 +71,14 @@ They follow the same caller policy as `/messages`.
 - **Limits:**
   - **Download:** 15 MB, checked against Gmail's part size first and enforced again while reading the response.
     Personal Gmail caps attachments at 25 MB.
-  - **PDF:** 300 pages and a 10 s budget.
+  - **PDF:** 300 pages and a 10 s budget. Every stream filter is wrapped: the output size of Flate, LZW and
+    RunLength data is measured with a constant-memory counting decoder before PdfPig decodes it, so a decompression
+    bomb is refused before it inflates. Nested filter chains are checked stage by stage; image codecs that expand data
+    (CCITT, JBIG2) are refused, since text extraction never needs them. Per document, filters may produce at most 32 MB
+    and the extraction thread may allocate at most 512 MB. At most 2 extractions and 2 downloads run at once,
+    process-wide. Extraction runs off the request thread and stops when the request is aborted.
+  - **Hidden PDF text:** glyphs drawn invisibly (render mode 3/7), in white, below 1pt, or outside the crop box are
+    removed, and `detail` reports how many.
   - **Text:** capped at 20 000 characters, with `truncated`.
 - **Nothing is executed, rendered, or opened by an external program.** Bytes and text exist only in memory for the
   request and are cleared afterwards; nothing is written to records, entities, or disk.
@@ -87,6 +99,12 @@ Every message body (`/messages/{id}`, `/threads/{id}`) and every attachment text
   - **`links[]`** come from the visible content only. Links that occur only in hidden regions are returned separately
     in `hiddenLinks[]`, flagged `hidden: true`. The hidden text itself is never returned; only a segment count is.
   - **`sentinel`** is `{ available, risk, signals, handling, isolation, screening, reason?, jobId? }`.
+  - **Empty visible content:** when everything was hidden, the empty `VisibleContent` is trusted. Content that was
+    never screened is screened locally with the model-free pass; raw input is shown only if even that is impossible.
+    Unicode tag characters and other invisible characters are always stripped.
+  - **Header fields:** sender, subject and snippet bypass the model review, so they are cleaned and screened with
+    the model-free pass everywhere (`/messages`, `/threads`, `/search`). Findings appear as `metadata.signals`.
+  - **Snippets:** dropped whenever a body is returned. Gmail's snippet can carry hidden preheader text.
 - **Soft dependency:** Mail never `requires` the capability. Without cap-sentinel, content is returned as before with
   `sentinel.available=false` (`reason: not_installed`).
 - **Budgets:** there is one review per item per request, and `/threads` reviews at most 3 messages concurrently. A
