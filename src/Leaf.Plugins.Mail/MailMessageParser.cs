@@ -404,20 +404,45 @@ public static class MailMessageParser
         return builder.ToString();
     }
 
-    /// <summary>Removes control, zero-width, and bidi-override characters (except newline/tab and Mail's own markers).</summary>
+    /// <summary>
+    /// Removes characters a reader cannot see but a model reads: controls (except newline, tab
+    /// and Mail's own link markers), zero-width and joiner characters, bidi overrides and
+    /// isolates, invisible math operators, soft hyphens, the BOM, and Unicode tag characters
+    /// (U+E0000-U+E007F, encoded as surrogate pairs U+DB40 U+DC00-U+DC7F, used for
+    /// "ASCII smuggling"). Unpaired surrogates are dropped too.
+    /// </summary>
     internal static string StripInvisible(string text)
     {
-        var builder = new StringBuilder(text.Length);
-        foreach (var c in text.Replace("\r\n", "\n").Replace('\r', '\n'))
+        var source = text.Replace("\r\n", "\n").Replace('\r', '\n');
+        var builder = new StringBuilder(source.Length);
+        for (var i = 0; i < source.Length; i++)
         {
+            var c = source[i];
+            if (char.IsHighSurrogate(c))
+            {
+                if (i + 1 >= source.Length || !char.IsLowSurrogate(source[i + 1])) continue; // unpaired
+                var low = source[i + 1];
+                i++;
+                if (c == '\uDB40' && low is >= '\uDC00' and <= '\uDC7F') continue; // tag character
+                builder.Append(c).Append(low);
+                continue;
+            }
+            if (char.IsLowSurrogate(c)) continue; // unpaired
             if (c is '\n' or '\t') { builder.Append(c); continue; }
             if (char.IsControl(c) && c is not ('\u0001' or '\u0002')) continue;
-            if (c is >= '​' and <= '‏' or >= '‪' and <= '‮' or >= '⁦' and <= '⁩' or '﻿' or '­')
-                continue;
+            if (IsInvisible(c)) continue;
             builder.Append(c);
         }
         return builder.ToString();
     }
+
+    internal static bool IsInvisible(char c)
+        => c is >= '\u200B' and <= '\u200F'   // zero-width space/joiners, LRM/RLM
+            or >= '\u202A' and <= '\u202E'      // bidi embeddings and overrides
+            or >= '\u2060' and <= '\u2064'      // word joiner, invisible operators
+            or >= '\u2066' and <= '\u2069'      // bidi isolates
+            or '\u00AD' or '\u034F' or '\u061C' or '\u115F' or '\u1160' or '\u17B4' or '\u17B5'
+            or '\u180E' or '\u3164' or '\uFEFF' or '\uFFA0';
 
     private static string Clean(string value)
     {

@@ -75,16 +75,18 @@ public sealed class MailSentinel(IUntrustedContentReview? review, ILogger<MailSe
                 reason = "error";
                 logger?.LogWarning("Sentinel review for {Source} failed ({Type})", source, ex.GetType().Name);
             }
-            if (screening == null)
-            {
-                // The model-free pre-pass is cheap and synchronous: still strip hidden content.
-                try { screening = review.Screen(input, format); }
-                catch (Exception ex) when (ex is not OutOfMemoryException) { screening = null; }
-            }
         }
 
-        // An unscreened item (too large, or no screening ran) has empty VisibleContent.
-        var visible = screening is { } s && (s.VisibleContent.Length > 0 || input.Length == 0) ? s.VisibleContent : null;
+        // Trust VisibleContent whenever screening ran, including when everything was hidden
+        // (empty). Only an item that was never screened (the Sentinel's Unscreened result:
+        // empty visible content, no hidden-content signals, or content-too-large) is screened
+        // locally instead, and only if that is impossible is the raw input shown.
+        if (review != null && (screening == null || !Screened(screening, input)))
+        {
+            try { screening = review.Screen(input, format); }
+            catch (Exception ex) when (ex is not OutOfMemoryException) { screening = null; }
+        }
+        var visible = screening != null && Screened(screening, input) ? screening.VisibleContent : null;
         var shown = visible ?? input;
         var body = html ? MailMessageParser.SanitizeHtml(shown) : MailMessageParser.SanitizeText(shown);
         if (cut) body = body with { Truncated = true };
@@ -120,6 +122,11 @@ public sealed class MailSentinel(IUntrustedContentReview? review, ILogger<MailSe
             };
         return new ReviewedContent(body, hidden, sentinel);
     }
+
+    /// <summary>True when the screening actually looked at <paramref name="input"/>.</summary>
+    internal static bool Screened(UntrustedContentScreening screening, string input)
+        => !screening.InjectionSignals.Contains(UntrustedContentScreening.ContentTooLargeSignal)
+            && (screening.HasHiddenContent || screening.VisibleContent.Length > 0 || input.Length == 0);
 
     /// <summary>The Sentinel reviews at most this many characters (its own review bound); longer
     /// input is cut first and the result marked truncated.</summary>
