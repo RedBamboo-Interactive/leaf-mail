@@ -202,12 +202,15 @@ public sealed class SandboxTests(ITestOutputHelper output)
     public async Task The_wall_clock_kills_the_whole_job_and_reports_too_complex()
     {
         var slow = new ExtractorSandbox(Sandbox.HelperPath) { WallClock = TimeSpan.FromMilliseconds(150) };
+        var pdf = PdfFixtures.Pages(250, Enumerable.Repeat(new string('z', 80), 40).ToArray());
         var clock = Stopwatch.StartNew();
-        var result = await slow.ExtractAsync(PdfFixtures.Pages(250, Enumerable.Repeat(new string('z', 80), 40).ToArray()),
-            "application/pdf", "slow.pdf", null, default);
+        var result = await slow.ExtractAsync(pdf, "application/pdf", "slow.pdf", null, default);
+        clock.Stop();
+        var sandbox = Assert.IsType<SandboxStats>(result.Sandbox);
         Assert.Equal(AttachmentStatus.TooComplex, result.Status);
-        Assert.Equal("time", result.Sandbox!.Limit);
+        Assert.Equal("time", sandbox.Limit);
         Assert.Contains("(time)", result.Detail);
+        Assert.True(sandbox.Wall < TimeSpan.FromSeconds(5), $"sandbox reported {sandbox.Wall}");
         Assert.True(clock.Elapsed < TimeSpan.FromSeconds(5), $"took {clock.Elapsed}");
     }
 
