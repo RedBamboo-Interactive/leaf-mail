@@ -33,10 +33,12 @@ internal sealed class FakeReview : IUntrustedContentReview
     }
 
     public int ScreenCalls;
+    public readonly ConcurrentQueue<string> Screened = new();
 
     public UntrustedContentScreening Screen(string content, UntrustedContentFormat format = UntrustedContentFormat.Text, string? ownerDisplayName = null)
     {
         Interlocked.Increment(ref ScreenCalls);
+        Screened.Enqueue(content);
         if (Hidden == null || !content.Contains(Hidden, StringComparison.Ordinal))
             return new UntrustedContentScreening(0, [], [], content, []);
         return new UntrustedContentScreening(45, ["instruction-override"], ["css-hidden"], content.Replace(Hidden, ""), [Hidden]);

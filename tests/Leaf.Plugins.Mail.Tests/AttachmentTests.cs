@@ -242,10 +242,11 @@ public sealed class AttachmentServiceTests
         Assert.Equal(3, items.Length); // the text/plain body is not an attachment
         Assert.Equal(("notice.pdf", "application/pdf", 1000L, false),
             (items[0]["filename"]!.GetValue<string>(), items[0]["mimeType"]!.GetValue<string>(), items[0]["size"]!.GetValue<long>(), items[0]["inline"]!.GetValue<bool>()));
-        Assert.Equal("ANGjdJ_pdf", items[0]["attachmentId"]!.GetValue<string>());
+        Assert.Equal(("1", "ANGjdJ_pdf"), (items[0]["partId"]!.GetValue<string>(), items[0]["attachmentId"]!.GetValue<string>()));
         Assert.True(items[1]["inline"]!.GetValue<bool>());
         Assert.Equal("image/png", items[1]["mimeType"]!.GetValue<string>());
-        Assert.Equal("inline.3", items[2]["attachmentId"]!.GetValue<string>()); // small part Gmail returned inline
+        Assert.Equal("3", items[2]["partId"]!.GetValue<string>()); // small part Gmail returned inline: no attachmentId
+        Assert.Null(items[2]["attachmentId"]);
     }
 
     [Fact]

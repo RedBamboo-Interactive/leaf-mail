@@ -20,6 +20,7 @@ public sealed record MailMetadata(
     IReadOnlyList<string> LabelIds,
     string? Snippet)
 {
+
     /// <summary>
     /// The only shape written to kernel records: no sender, recipient, subject, or snippet.
     /// Kernel stream reads are not bound by Mail's caller policy, so content stays live-only.
@@ -63,6 +64,8 @@ public static class MailMessageParser
     public const int BodyCap = 20_000;
     public const int LinkCap = 50;
     public const int InputCap = 512 * 1024;
+    public const int MaxFilenameLength = 255;
+
     private const int HeaderCap = 512;
     private const int SnippetCap = 400;
     private static readonly TimeSpan RegexTimeout = TimeSpan.FromMilliseconds(250);
@@ -163,6 +166,8 @@ public static class MailMessageParser
             || disposition.TrimStart().StartsWith("attachment", StringComparison.OrdinalIgnoreCase);
         var partId = payload.TryGetProperty("partId", out var pid) ? pid.GetString() : null;
         var contentId = headers.GetValueOrDefault("content-id") ?? headers.GetValueOrDefault("x-attachment-id");
+        // Filenames are attacker-chosen: cleaned (controls, bidi, invisible removed) and capped.
+        filename = string.IsNullOrWhiteSpace(filename) ? null : Cap(filename, MaxFilenameLength);
         yield return new Part(mime.ToLowerInvariant(), string.IsNullOrEmpty(filename) ? null : filename,
             string.IsNullOrEmpty(data) ? null : data, attachmentId, charset, isAttachment, size,
             string.IsNullOrEmpty(partId) ? null : partId, string.IsNullOrWhiteSpace(disposition) ? null : disposition.Trim(),

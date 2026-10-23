@@ -500,14 +500,18 @@ public sealed class MailService(
     /// Fetches one attachment live, extracts its text in memory, reviews it with the Sentinel,
     /// and returns it. The bytes are cleared before returning; nothing is stored.
     /// </summary>
-    public async Task<JsonObject> AttachmentTextAsync(string id, string attachmentId, MailCaller caller, CancellationToken ct)
+    /// <summary>
+    /// Fetches one attachment live, extracts its text in memory (gated and cancellable), reviews
+    /// it with the Sentinel, and returns it. <paramref name="reference"/> is the stable partId (or
+    /// a Gmail attachmentId from the same fetch); the current attachmentId always comes from this
+    /// fresh messages.get. The bytes are cleared before returning; nothing is stored.
+    /// </summary>
+    public async Task<JsonObject> AttachmentTextAsync(string id, string reference, MailCaller caller, CancellationToken ct)
     {
         await RequireConnectedAsync(ct);
         using var doc = await gmail.GetMessageAsync(id, "full", ct);
-        var info = AttachmentExtractor.List(doc.RootElement).FirstOrDefault(a => a.Id == attachmentId)
+        var info = AttachmentExtractor.Find(AttachmentExtractor.List(doc.RootElement), reference)
             ?? throw new MailFault("attachment_not_found", 404);
-        var part = MailMessageParser.Parts(doc.RootElement.TryGetProperty("payload", out var p) ? p : default)
-            .FirstOrDefault(x => x.AttachmentId == attachmentId || (x.PartId != null && "inline." + x.PartId == attachmentId));
         var result = new JsonObject
         {
             ["untrusted"] = true,
@@ -516,7 +520,7 @@ public sealed class MailService(
             ["attachment"] = info.ToJson(),
         };
 
-        ExtractedAttachment extracted;
+        ExtractedAttachment? extracted = null;
         if (info.Size > AttachmentExtractor.MaxDownloadBytes)
             extracted = TooLarge(info.MimeType, info.Size);
         else
@@ -524,12 +528,21 @@ public sealed class MailService(
             byte[] bytes = [];
             try
             {
-                bytes = part?.Data is { } inline
-                    ? GmailClient.DecodeBase64Url(inline)
-                    : await gmail.GetAttachmentBytesAsync(id, attachmentId, AttachmentExtractor.MaxDownloadBytes, ct);
-                extracted = bytes.Length > AttachmentExtractor.MaxDownloadBytes
+                if (info.InlineData is { } inline)
+                {
+                    try { bytes = GmailClient.DecodeBase64Url(inline); }
+                    catch (GmailApiException)
+                    {
+                        extracted = new ExtractedAttachment(AttachmentStatus.Unreadable, "", false, false, info.MimeType,
+                            "The attachment data is corrupt");
+                    }
+                }
+                else if (info.AttachmentId is { } current)
+                    bytes = await gmail.GetAttachmentBytesAsync(id, current, AttachmentExtractor.MaxDownloadBytes, ct);
+
+                extracted ??= bytes.Length > AttachmentExtractor.MaxDownloadBytes
                     ? TooLarge(info.MimeType, bytes.Length)
-                    : AttachmentExtractor.Extract(bytes, info.MimeType, info.Filename, part?.Charset);
+                    : await AttachmentExtractor.ExtractAsync(bytes, info.MimeType, info.Filename, info.Charset, ct);
             }
             catch (AttachmentTooLargeException) { extracted = TooLarge(info.MimeType, info.Size); }
             finally { Array.Clear(bytes); }
@@ -546,11 +559,11 @@ public sealed class MailService(
             return result;
         }
 
-        var context = await ReviewContextAsync(caller, $"/api/extensions/mail/messages/{id}/attachments/{{attachmentId}}/text",
+        var context = await ReviewContextAsync(caller, "/api/extensions/mail/messages/{id}/attachments/{partId}/text",
             [new("mail-message", id), new("mail-attachment", info.PartId, NameSnapshot: info.Filename)], ct);
         using var budget = Budget(ct);
         var reviewed = await sentinel.ReviewAsync(extracted.Content, extracted.IsHtml, UntrustedContentSources.Attachment,
-            $"{id}/{info.PartId ?? "attachment"}", context, budget.Token);
+            $"{id}/{info.PartId}", context, budget.Token);
         if (extracted.Truncated) reviewed = reviewed with { Body = reviewed.Body with { Truncated = true } };
         foreach (var (key, value) in ContentJson(reviewed)) result[key] = value?.DeepClone();
         return result;

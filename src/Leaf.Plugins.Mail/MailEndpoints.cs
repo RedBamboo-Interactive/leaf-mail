@@ -93,11 +93,12 @@ internal static class MailEndpoints
             return Results.Ok(await service.AttachmentsAsync(id, c.RequestAborted));
         });
 
-        group.MapGet("/messages/{id}/attachments/{attachmentId}/text", async (string id, string attachmentId, HttpContext c, MailService service) =>
+        // Keyed on the stable partId; a Gmail attachmentId from the same fetch is still accepted.
+        group.MapGet("/messages/{id}/attachments/{attachment}/text", async (string id, string attachment, HttpContext c, MailService service) =>
         {
             if (!GmailClient.IsValidId(id)) throw new ArgumentException("Invalid message id");
-            if (!IsAttachmentId(attachmentId)) throw new ArgumentException("Invalid attachment id");
-            return Results.Ok(await service.AttachmentTextAsync(id, attachmentId, Reader(c), c.RequestAborted));
+            if (!IsAttachmentId(attachment)) throw new ArgumentException("Invalid attachment reference");
+            return Results.Ok(await service.AttachmentTextAsync(id, attachment, Reader(c), c.RequestAborted));
         });
 
         // ── Owner-only settings and OAuth ─────────────────────────────────────

@@ -147,40 +147,119 @@ public sealed class GmailClient(HttpClient http, GoogleEndpoints endpoints, IMai
         return GetJsonAsync($"/messages/{messageId}/attachments/{attachmentId}", ct);
     }
 
+    /// <summary>At most this many attachment downloads are in memory at once, process-wide.</summary>
+    public const int MaxConcurrentDownloads = 2;
+    private static readonly SemaphoreSlim DownloadGate = new(MaxConcurrentDownloads, MaxConcurrentDownloads);
+
     /// <summary>
-    /// users.messages.attachments.get, decoded to bytes in memory. The response is read with a
-    /// hard bound (base64url of <paramref name="maxBytes"/> plus envelope), so a part whose size
-    /// field understates its content still cannot exceed the cap. Nothing touches disk.
+    /// users.messages.attachments.get, decoded to bytes in memory. The response is read into one
+    /// pooled buffer with a hard bound (base64url of <paramref name="maxBytes"/> plus envelope), the
+    /// <c>data</c> value is located in place with a JSON reader, and decoded straight into the
+    /// exact-size result: one transient copy of the response, cleared and returned to the pool.
+    /// Nothing touches disk.
     /// </summary>
     public async Task<byte[]> GetAttachmentBytesAsync(string messageId, string attachmentId, long maxBytes, CancellationToken ct)
     {
         if (!IsValidId(messageId) || !AttachmentIdShape.IsMatch(attachmentId))
             throw new ArgumentException("Invalid message or attachment id");
-        var maxResponse = maxBytes / 3 * 4 + 8 + 64 * 1024;
-        using var response = await SendAsync(() => new HttpRequestMessage(HttpMethod.Get,
-            endpoints.GmailBase + $"/messages/{messageId}/attachments/{attachmentId}"), ct);
-        if (response.Content.Headers.ContentLength > maxResponse) throw new AttachmentTooLargeException();
-        await using var stream = await response.Content.ReadAsStreamAsync(ct);
-        using var buffer = new MemoryStream();
-        var chunk = new byte[81920];
-        int read;
-        while ((read = await stream.ReadAsync(chunk, ct)) > 0)
-        {
-            if (buffer.Length + read > maxResponse) throw new AttachmentTooLargeException();
-            buffer.Write(chunk, 0, read);
-        }
-        string? data;
+        var maxResponse = (int)Math.Min(int.MaxValue - 1024, maxBytes / 3 * 4 + 8 + 64 * 1024);
+        await DownloadGate.WaitAsync(ct);
         try
         {
-            using var doc = JsonDocument.Parse(buffer.GetBuffer().AsMemory(0, (int)buffer.Length));
-            data = doc.RootElement.TryGetProperty("data", out var d) ? d.GetString() : null;
+            using var response = await SendAsync(() => new HttpRequestMessage(HttpMethod.Get,
+                endpoints.GmailBase + $"/messages/{messageId}/attachments/{attachmentId}"), ct);
+            if (response.Content.Headers.ContentLength > maxResponse) throw new AttachmentTooLargeException();
+            var buffer = System.Buffers.ArrayPool<byte>.Shared.Rent(Math.Min(maxResponse + 1, 1 << 20));
+            var length = 0;
+            try
+            {
+                await using var stream = await response.Content.ReadAsStreamAsync(ct);
+                while (true)
+                {
+                    if (length == buffer.Length)
+                    {
+                        if (buffer.Length > maxResponse) throw new AttachmentTooLargeException();
+                        var larger = System.Buffers.ArrayPool<byte>.Shared.Rent(Math.Min(maxResponse + 1, buffer.Length * 2));
+                        buffer.AsSpan(0, length).CopyTo(larger);
+                        Array.Clear(buffer, 0, length);
+                        System.Buffers.ArrayPool<byte>.Shared.Return(buffer);
+                        buffer = larger;
+                    }
+                    var read = await stream.ReadAsync(buffer.AsMemory(length, buffer.Length - length), ct);
+                    if (read == 0) break;
+                    length += read;
+                    if (length > maxResponse) throw new AttachmentTooLargeException();
+                }
+                return DecodeDataField(buffer.AsSpan(0, length), maxBytes);
+            }
+            finally
+            {
+                Array.Clear(buffer, 0, length);
+                System.Buffers.ArrayPool<byte>.Shared.Return(buffer);
+            }
+        }
+        finally { DownloadGate.Release(); }
+    }
+
+    /// <summary>Finds the MessagePartBody <c>data</c> string and base64url-decodes it in place.</summary>
+    internal static byte[] DecodeDataField(Span<byte> json, long maxBytes)
+    {
+        var reader = new Utf8JsonReader(json);
+        int start = -1, valueLength = 0;
+        try
+        {
+            while (reader.Read())
+            {
+                if (reader.TokenType == JsonTokenType.PropertyName && reader.CurrentDepth == 1 && reader.ValueTextEquals("data"u8))
+                {
+                    if (!reader.Read() || reader.TokenType != JsonTokenType.String || reader.ValueIsEscaped)
+                        throw new GmailApiException(HttpStatusCode.BadGateway, "Gmail returned an unreadable attachment");
+                    start = (int)reader.TokenStartIndex + 1; // skip the opening quote
+                    valueLength = reader.ValueSpan.Length;
+                    break;
+                }
+            }
         }
         catch (JsonException) { throw new GmailApiException(HttpStatusCode.BadGateway, "Gmail returned an unreadable attachment"); }
-        finally { Array.Clear(buffer.GetBuffer()); }
-        if (string.IsNullOrEmpty(data)) return [];
-        var bytes = DecodeBase64Url(data);
-        if (bytes.Length > maxBytes) { Array.Clear(bytes); throw new AttachmentTooLargeException(); }
-        return bytes;
+        if (start < 0 || valueLength == 0) return [];
+        return DecodeBase64Url(json.Slice(start, valueLength), maxBytes);
+    }
+
+    /// <summary>Base64url (unpadded) to bytes, translating the alphabet in place in <paramref name="data"/>.</summary>
+    internal static byte[] DecodeBase64Url(Span<byte> data, long maxBytes)
+    {
+        for (var i = 0; i < data.Length; i++)
+        {
+            if (data[i] == (byte)'-') data[i] = (byte)'+';
+            else if (data[i] == (byte)'_') data[i] = (byte)'/';
+        }
+        var trimmed = data;
+        while (trimmed.Length > 0 && trimmed[^1] == (byte)'=') trimmed = trimmed[..^1];
+        var remainder = trimmed.Length % 4;
+        if (remainder == 1) throw new GmailApiException(HttpStatusCode.BadGateway, "Gmail returned an undecodable attachment");
+        long size = trimmed.Length / 4 * 3 + (remainder == 0 ? 0 : remainder - 1);
+        if (size > maxBytes) throw new AttachmentTooLargeException();
+        var result = new byte[size];
+        var whole = trimmed.Length - remainder;
+        if (System.Buffers.Text.Base64.DecodeFromUtf8(trimmed[..whole], result, out _, out var written) != System.Buffers.OperationStatus.Done)
+        {
+            Array.Clear(result);
+            throw new GmailApiException(HttpStatusCode.BadGateway, "Gmail returned an undecodable attachment");
+        }
+        if (remainder > 0)
+        {
+            Span<byte> tail = stackalloc byte[4];
+            trimmed[whole..].CopyTo(tail);
+            tail[remainder..].Fill((byte)'=');
+            Span<byte> decoded = stackalloc byte[3];
+            if (System.Buffers.Text.Base64.DecodeFromUtf8(tail, decoded, out _, out var tailWritten) != System.Buffers.OperationStatus.Done)
+            {
+                Array.Clear(result);
+                throw new GmailApiException(HttpStatusCode.BadGateway, "Gmail returned an undecodable attachment");
+            }
+            decoded[..tailWritten].CopyTo(result.AsSpan(written));
+        }
+        return result;
     }
 
     internal static byte[] DecodeBase64Url(string data)
