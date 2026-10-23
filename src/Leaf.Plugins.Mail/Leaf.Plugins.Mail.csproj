@@ -57,4 +57,7 @@
     <InternalsVisibleTo Include="Leaf.Plugins.Mail.Tests" />
   </ItemGroup>
 
+  <!-- PDF, HTML, calendar and message parsing run in the extractor helper, copied to extractor/. -->
+  <Import Project="..\..\build\MailExtractor.targets" />
+
 </Project>

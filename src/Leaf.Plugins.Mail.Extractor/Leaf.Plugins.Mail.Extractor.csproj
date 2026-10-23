@@ -1,0 +1,43 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- The attachment extractor helper: a console app the plugin starts once per extraction
+       inside a Windows job object (see AttachmentSandbox.cs). It compiles the plugin's
+       extraction sources directly and has no Leaf.Sdk, network, or file-writing code: bytes in
+       on stdin, bounded JSON out on stdout. The plugin builds it as a non-referenced project
+       reference and copies its output into extractor/ beside the plugin assembly
+       (build/MailExtractor.targets). -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net9.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>Leaf.Plugins.Mail</RootNamespace>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <!-- Framework-dependent: runs on the .NET the kernel runs on (or a newer major). -->
+    <RollForward>Major</RollForward>
+    <!-- Small, predictable footprint inside the job's memory limit. -->
+    <ServerGarbageCollection>false</ServerGarbageCollection>
+    <ConcurrentGarbageCollection>false</ConcurrentGarbageCollection>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\Leaf.Plugins.Mail\MailAttachments.cs" Link="Shared\MailAttachments.cs" />
+    <Compile Include="..\Leaf.Plugins.Mail\PdfLimits.cs" Link="Shared\PdfLimits.cs" />
+    <Compile Include="..\Leaf.Plugins.Mail\AttachmentWire.cs" Link="Shared\AttachmentWire.cs" />
+    <Compile Include="..\Leaf.Plugins.Mail\MailMessageParser.cs" Link="Shared\MailMessageParser.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="PdfPig" Version="0.1.16" />
+    <PackageReference Include="MimeKitLite" Version="4.18.1" />
+  </ItemGroup>
+
+  <PropertyGroup Condition="'$(Configuration)' == 'Release'">
+    <ContinuousIntegrationBuild>true</ContinuousIntegrationBuild>
+    <PathMap>$([System.IO.Path]::GetFullPath('$(MSBuildProjectDirectory)\..\..'))=/_/mail</PathMap>
+  </PropertyGroup>
+
+</Project>

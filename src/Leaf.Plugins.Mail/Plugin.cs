@@ -54,7 +54,8 @@ public sealed class MailPlugin : ILeafPlugin
             sp.GetRequiredKeyedService<IRecordStreams>(PluginId),
             sp.GetRequiredService<MailLiveOutbox>(),
             sp.GetService<ILogger<MailService>>(),
-            sentinel: sp.GetRequiredService<MailSentinel>()));
+            sentinel: sp.GetRequiredService<MailSentinel>(),
+            extractor: ExtractorSandbox.Resolve(ctx.PluginDirectory)));
         // Soft dependency on the shared Sentinel (cap-sentinel): optional resolution, never a
         // hard "requires". Without it Mail sanitizes as before and reports sentinel.available=false.
         services.AddSingleton(sp => new MailSentinel(

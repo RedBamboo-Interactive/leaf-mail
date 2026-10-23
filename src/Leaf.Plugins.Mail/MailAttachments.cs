@@ -37,12 +37,19 @@ public static class AttachmentStatus
     public const string Unreadable = "unreadable";
     public const string NoText = "no_text";
     public const string TooLarge = "too_large";
+    /// <summary>Extraction stopped at a safe processing limit (memory, time, decompressed size).</summary>
+    public const string TooComplex = "too_complex";
 }
 
 /// <param name="Content">Plain text, or HTML when <see cref="IsHtml"/> (sanitized afterwards).</param>
 /// <param name="Signals">Suspicious traits of the document that were kept in the text, as stable slugs.</param>
+/// <param name="Sandbox">What the out-of-process run cost, when there was one (diagnostics and tests; never returned over HTTP).</param>
 public sealed record ExtractedAttachment(string Status, string Content, bool IsHtml, bool Truncated, string Kind, string? Detail = null,
-    int? Pages = null, PdfStats? Stats = null, IReadOnlyList<string>? Signals = null);
+    int? Pages = null, PdfStats? Stats = null, IReadOnlyList<string>? Signals = null, SandboxStats? Sandbox = null);
+
+/// <param name="PeakJobMemory">Peak committed memory of the helper's job object.</param>
+/// <param name="Limit">The job limit that stopped the helper (<c>memory</c>, <c>time</c>), if any.</param>
+public sealed record SandboxStats(long PeakJobMemory, TimeSpan CpuTime, TimeSpan Wall, int ExitCode, string? Limit);
 
 /// <summary>What a PDF extraction cost (diagnostics and tests; never returned over HTTP).</summary>
 public sealed record PdfStats(long DecodedBytes, long AllocatedBytes, TimeSpan Elapsed, PdfGlyphCounts Glyphs);
@@ -62,10 +69,12 @@ public sealed record PdfGlyphCounts(int Removed = 0, int OcrLayer = 0, int White
 internal enum GlyphClass { Visible, Removed, OcrLayer, White, Tiny, OffPage }
 
 /// <summary>
-/// Read-only attachment text extraction, entirely in memory. Nothing is executed, rendered, or
-/// handed to an external program, and nothing is written to disk. PDF text comes from PdfPig
-/// (no OCR: an image-only PDF is <c>no_text</c>) under page and time limits; message/rfc822 is
-/// parsed by MimeKitLite; calendars are unfolded into readable lines.
+/// Read-only attachment text extraction, entirely in memory; nothing is executed, rendered, or
+/// written to disk. PDF text comes from PdfPig (no OCR: an image-only PDF is <c>no_text</c>) under
+/// page, time, and decompression limits; message/rfc822 is parsed by MimeKitLite; calendars are
+/// unfolded into readable lines. This file is compiled into both the plugin and the extractor
+/// helper: the plugin runs PDF, HTML, calendar and message parsing in the helper, inside a job
+/// object (see AttachmentSandbox.cs), and only plain text and CSV in process.
 /// </summary>
 public static class AttachmentExtractor
 {
@@ -76,42 +85,6 @@ public static class AttachmentExtractor
     public const long MaxPdfDecodedBytes = 32L * 1024 * 1024;
     /// <summary>Total bytes the extraction thread may allocate for one PDF.</summary>
     public const long MaxPdfAllocatedBytes = 512L * 1024 * 1024;
-    /// <summary>At most this many extractions run at once, process-wide.</summary>
-    public const int MaxConcurrentExtractions = 2;
-    private static readonly SemaphoreSlim Gate = new(MaxConcurrentExtractions, MaxConcurrentExtractions);
-
-    /// <summary>
-    /// Extraction off the request thread, behind a process-wide gate, honouring the request's
-    /// cancellation. The gate is held until the worker has actually finished, so a cancelled
-    /// request cannot leave unbounded work running behind it.
-    /// </summary>
-    public static async Task<ExtractedAttachment> ExtractAsync(byte[] bytes, string mimeType, string? filename, string? charset, CancellationToken ct)
-    {
-        await Gate.WaitAsync(ct);
-        var work = Task.Run(() =>
-        {
-            var now = Interlocked.Increment(ref _active);
-            int seen;
-            while (now > (seen = Volatile.Read(ref _maxObserved)) && Interlocked.CompareExchange(ref _maxObserved, now, seen) != seen) { }
-            try { return Extract(bytes, mimeType, filename, charset, ct); }
-            finally { Interlocked.Decrement(ref _active); }
-        }, CancellationToken.None);
-        try { return await work; }
-        finally
-        {
-            // Release only once the worker has finished, even if the caller was cancelled.
-            await work.ContinueWith(_ => { }, TaskScheduler.Default);
-            Gate.Release();
-        }
-    }
-
-    private static int _active;
-    private static int _maxObserved;
-
-    /// <summary>Highest number of extractions observed running at once (diagnostics and tests).</summary>
-    public static int MaxObservedConcurrency => Volatile.Read(ref _maxObserved);
-
-    internal static void ResetObservedConcurrency() => Interlocked.Exchange(ref _maxObserved, 0);
     /// <summary>Extracted text kept before sanitizing; the sanitizer caps the result at 20 000.</summary>
     public const int RawTextCap = MailMessageParser.InputCap;
 
@@ -190,12 +163,20 @@ public static class AttachmentExtractor
             };
         }
         catch (OperationCanceledException) { throw; }
+        catch (Exception ex) when (ex is OutOfMemoryException or InsufficientExecutionStackException)
+        {
+            return TooComplex(kind, ex is OutOfMemoryException ? "memory" : "nesting");
+        }
         catch (Exception)
         {
             return new ExtractedAttachment(AttachmentStatus.Unreadable, "", false, false, kind,
                 $"The {kind} attachment could not be read");
         }
     }
+
+    public static ExtractedAttachment TooComplex(string kind, string limit, int? pages = null, PdfStats? stats = null)
+        => new(AttachmentStatus.TooComplex, "", false, false, kind,
+            $"The attachment exceeds the safe processing limits ({limit})", pages, stats);
 
     private static ExtractedAttachment Text(string text, string kind, bool html)
     {
@@ -269,13 +250,11 @@ public static class AttachmentExtractor
             // Text gathered before the limit is still useful; otherwise the PDF is refused.
             return builder.Length > 0
                 ? Finish($"Stopped at the {ex.Message} limit")
-                : new ExtractedAttachment(AttachmentStatus.Unreadable, "", false, false, kind,
-                    $"The PDF exceeds the safe processing limits ({ex.Message})", pages, Stats());
+                : TooComplex(kind, ex.Message, pages, Stats());
         }
         catch (Exception ex) when (ex is OutOfMemoryException or InsufficientExecutionStackException)
         {
-            return new ExtractedAttachment(AttachmentStatus.Unreadable, "", false, false, kind,
-                "The PDF exceeds the safe processing limits (memory)", pages, Stats());
+            return TooComplex(kind, ex is OutOfMemoryException ? "memory" : "nesting", pages, Stats());
         }
         catch (Exception)
         {

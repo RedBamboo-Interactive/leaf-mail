@@ -124,7 +124,7 @@ public sealed class PdfBombTests(ITestOutputHelper output)
         var result = AttachmentExtractor.Extract(pdf, "application/pdf", "bomb.pdf", null);
         wall.Stop();
         Report("flate bomb", pdf.Length, decoded, result, wall.Elapsed);
-        Assert.Equal(AttachmentStatus.Unreadable, result.Status);
+        Assert.Equal(AttachmentStatus.TooComplex, result.Status);
         Assert.Contains("decompressed size", result.Detail);
         Assert.True(result.Stats!.DecodedBytes <= Limit);
         Assert.True(result.Stats.AllocatedBytes < 64L * 1024 * 1024, $"allocated {result.Stats.AllocatedBytes}");
@@ -142,7 +142,7 @@ public sealed class PdfBombTests(ITestOutputHelper output)
         var result = AttachmentExtractor.Extract(pdf, "application/pdf", "nested.pdf", null);
         wall.Stop();
         Report("nested flate bomb", pdf.Length, decoded, result, wall.Elapsed);
-        Assert.Equal(AttachmentStatus.Unreadable, result.Status);
+        Assert.Equal(AttachmentStatus.TooComplex, result.Status);
         Assert.True(result.Stats!.AllocatedBytes < 64L * 1024 * 1024, $"allocated {result.Stats.AllocatedBytes}");
         Assert.True(wall.Elapsed < TimeSpan.FromSeconds(2), $"took {wall.Elapsed}");
     }
@@ -156,7 +156,7 @@ public sealed class PdfBombTests(ITestOutputHelper output)
         var result = AttachmentExtractor.Extract(pdf, "application/pdf", "many.pdf", null);
         wall.Stop();
         Report("40 x 12 MB streams", pdf.Length, 40L * 12 * 1024 * 1024, result, wall.Elapsed);
-        Assert.Equal(AttachmentStatus.Unreadable, result.Status);
+        Assert.Equal(AttachmentStatus.TooComplex, result.Status);
         Assert.True(result.Stats!.DecodedBytes <= Limit);
         Assert.True(result.Stats.AllocatedBytes < 512L * 1024 * 1024, $"allocated {result.Stats.AllocatedBytes}");
         Assert.True(wall.Elapsed < TimeSpan.FromSeconds(5), $"took {wall.Elapsed}");
@@ -173,21 +173,22 @@ public sealed class PdfBombTests(ITestOutputHelper output)
     [Fact]
     public async Task Extraction_honours_cancellation_and_never_exceeds_the_concurrency_gate()
     {
+        var sandbox = ExtractorSandbox.Resolve(null);
         using var cancelled = new CancellationTokenSource();
         cancelled.Cancel();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
-            AttachmentExtractor.ExtractAsync(PdfFixtures.Text("x"), "application/pdf", "x.pdf", null, cancelled.Token));
+            sandbox.ExtractAsync(PdfFixtures.Text("x"), "application/pdf", "x.pdf", null, cancelled.Token));
 
         var pdf = PdfFixtures.Pages(120, Enumerable.Repeat(new string('w', 80), 40).ToArray());
-        AttachmentExtractor.ResetObservedConcurrency();
-        var runs = Enumerable.Range(0, 6).Select(_ => AttachmentExtractor.ExtractAsync(pdf, "application/pdf", "p.pdf", null, default)).ToArray();
+        ExtractorSandbox.ResetObservedConcurrency();
+        var runs = Enumerable.Range(0, 6).Select(_ => sandbox.ExtractAsync(pdf, "application/pdf", "p.pdf", null, default)).ToArray();
         await Task.WhenAll(runs);
         Assert.All(runs, r => Assert.Equal(AttachmentStatus.Ok, r.Result.Status));
-        Assert.InRange(AttachmentExtractor.MaxObservedConcurrency, 1, AttachmentExtractor.MaxConcurrentExtractions);
+        Assert.InRange(ExtractorSandbox.MaxObservedConcurrency, 1, ExtractorSandbox.MaxConcurrentExtractions);
 
         using var midway = new CancellationTokenSource(TimeSpan.FromMilliseconds(30));
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
-            AttachmentExtractor.ExtractAsync(PdfFixtures.Pages(250, Enumerable.Repeat(new string('z', 80), 40).ToArray()),
+            sandbox.ExtractAsync(PdfFixtures.Pages(250, Enumerable.Repeat(new string('z', 80), 40).ToArray()),
                 "application/pdf", "slow.pdf", null, midway.Token));
     }
 

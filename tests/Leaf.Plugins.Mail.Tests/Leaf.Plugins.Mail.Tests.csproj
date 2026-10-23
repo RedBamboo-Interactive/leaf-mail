@@ -27,4 +27,6 @@
   <ItemGroup Condition="'$(LeafSdkAssembly)' == '' And '$(LeafSdkProject)' != ''">
     <ProjectReference Include="$(LeafSdkProject)" />
   </ItemGroup>
+  <!-- The plugin assembly runs from this output, so the extractor helper must sit beside it here too. -->
+  <Import Project="..\..\build\MailExtractor.targets" />
 </Project>

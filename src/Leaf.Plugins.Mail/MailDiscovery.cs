@@ -51,7 +51,7 @@ internal static class MailDiscovery
         ["attachments"] = new JsonObject
         {
             ["types"] = new JsonArray("application/pdf", "text/plain", "text/csv", "text/html", "text/calendar", "message/rfc822"),
-            ["statuses"] = new JsonArray("ok", "unsupported", "unreadable", "no_text", "too_large"),
+            ["statuses"] = new JsonArray("ok", "unsupported", "unreadable", "no_text", "too_large", "too_complex"),
             ["maxDownloadBytes"] = AttachmentExtractor.MaxDownloadBytes,
             ["storage"] = "none: fetched live, extracted in memory, cleared after the response",
             ["ocr"] = false,
@@ -79,7 +79,7 @@ internal static class MailDiscovery
             Recipe("Read an attachment (receipt, invoice, booking, delivery notice)", [
                 $"GET {Base}/messages/{{id}}/attachments",
                 $"GET {Base}/messages/{{id}}/attachments/{{partId}}/text",
-                "status ok carries text; unsupported, unreadable, no_text and too_large carry no text",
+                "status ok carries text; unsupported, unreadable, no_text, too_large and too_complex carry no text",
             ]),
             Recipe("Connect (owner, Settings → Mail)", [
                 $"PUT {Base}/client with the downloaded Desktop client JSON",

@@ -1,0 +1,42 @@
+<Project>
+
+  <!-- Ships the attachment extractor helper beside the plugin assembly, in extractor/. Imported by
+       the plugin (workspace bin output and publish output, which becomes the .leafpkg backend/)
+       and by the tests (which load the plugin from their own output). The plugin resolves the
+       helper from that folder only, never from PATH. -->
+  <PropertyGroup>
+    <MailExtractorProject>$(MSBuildThisFileDirectory)..\src\Leaf.Plugins.Mail.Extractor\Leaf.Plugins.Mail.Extractor.csproj</MailExtractorProject>
+    <MailExtractorFolder>extractor</MailExtractorFolder>
+  </PropertyGroup>
+
+  <!-- Restored and built before this project, but never referenced or copied as an assembly,
+       and not passed on to projects that reference this one. -->
+  <ItemGroup>
+    <ProjectReference Include="$(MailExtractorProject)" ReferenceOutputAssembly="false" Private="false" PrivateAssets="all" />
+  </ItemGroup>
+
+  <Target Name="CopyMailExtractor" AfterTargets="Build" Condition="'$(DesignTimeBuild)' != 'true'">
+    <!-- Evaluation only: the build above already produced it. -->
+    <MSBuild Projects="$(MailExtractorProject)" Targets="GetTargetPath" RemoveProperties="TargetFramework;RuntimeIdentifier;SelfContained">
+      <Output TaskParameter="TargetOutputs" ItemName="_MailExtractorAssembly" />
+    </MSBuild>
+    <PropertyGroup>
+      <_MailExtractorOutput>@(_MailExtractorAssembly->'%(RootDir)%(Directory)')</_MailExtractorOutput>
+    </PropertyGroup>
+    <ItemGroup>
+      <_MailExtractorFile Include="$(_MailExtractorOutput)**\*" />
+    </ItemGroup>
+    <Error Condition="!Exists('$(_MailExtractorOutput)Leaf.Plugins.Mail.Extractor.exe')" Text="The extractor helper was not built (no apphost in $(_MailExtractorOutput))." />
+    <Copy SourceFiles="@(_MailExtractorFile)" DestinationFiles="@(_MailExtractorFile->'$(OutDir)$(MailExtractorFolder)\%(RecursiveDir)%(Filename)%(Extension)')" SkipUnchangedFiles="true">
+      <Output TaskParameter="CopiedFiles" ItemName="FileWrites" />
+    </Copy>
+  </Target>
+
+  <Target Name="PublishMailExtractor" AfterTargets="Publish" DependsOnTargets="CopyMailExtractor">
+    <ItemGroup>
+      <_MailExtractorPublished Include="$(OutDir)$(MailExtractorFolder)\**\*" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_MailExtractorPublished)" DestinationFiles="@(_MailExtractorPublished->'$(PublishDir)$(MailExtractorFolder)\%(RecursiveDir)%(Filename)%(Extension)')" SkipUnchangedFiles="true" />
+  </Target>
+
+</Project>

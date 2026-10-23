@@ -24,9 +24,11 @@ public sealed class MailService(
     MailLiveOutbox live,
     ILogger<MailService>? logger = null,
     TimeProvider? clock = null,
-    MailSentinel? sentinel = null)
+    MailSentinel? sentinel = null,
+    ExtractorSandbox? extractor = null)
 {
     private readonly MailSentinel sentinel = sentinel ?? new MailSentinel(null);
+    private readonly ExtractorSandbox extractor = extractor ?? ExtractorSandbox.Resolve(null);
     public const int BackfillDays = 14;
     public const int BackfillMax = 2000;
     public const int HistoryMax = 1000;
@@ -551,7 +553,7 @@ public sealed class MailService(
 
                 extracted ??= bytes.Length > AttachmentExtractor.MaxDownloadBytes
                     ? TooLarge(info.MimeType, bytes.Length)
-                    : await AttachmentExtractor.ExtractAsync(bytes, info.MimeType, info.Filename, info.Charset, ct);
+                    : await extractor.ExtractAsync(bytes, info.MimeType, info.Filename, info.Charset, ct);
             }
             catch (AttachmentTooLargeException) { extracted = TooLarge(info.MimeType, info.Size); }
             finally { Array.Clear(bytes); }

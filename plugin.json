@@ -36,6 +36,7 @@
     { "kind": "net", "target": "gmail.googleapis.com", "reason": "Gmail API (scope gmail.readonly only)" },
     { "kind": "net", "target": "oauth2.googleapis.com", "reason": "OAuth token exchange, refresh, and revocation" },
     { "kind": "net", "target": "accounts.google.com", "reason": "Owner consent page opened in the owner's browser" },
-    { "kind": "net", "target": "127.0.0.1", "reason": "Ephemeral loopback listener receiving the OAuth redirect during a consent attempt" }
+    { "kind": "net", "target": "127.0.0.1", "reason": "Ephemeral loopback listener receiving the OAuth redirect during a consent attempt" },
+    { "kind": "process", "target": "Leaf.Plugins.Mail.Extractor.exe", "reason": "Bundled attachment text extractor (backend/extractor/, never PATH), started once per PDF, HTML, calendar or email attachment read, inside a Windows job object (512 MB, 15 s, one process, no UI): bytes in on stdin, text out on stdout, no network, nothing written to disk" }
   ]
 }
