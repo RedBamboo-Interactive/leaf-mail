@@ -25,7 +25,7 @@ The kernel owns `/settings`, `/enable` and `/disable`. Start at `GET /` or `GET 
 | Route | Who | Purpose |
 |---|---|---|
 | `GET /`, `/discover`, `/openapi.json` | reader | Discovery document and OpenAPI |
-| `GET /status` | reader | connected, status, email, token_health, last_sync_at, last_error, granted scope, inbox unread |
+| `GET /status` | reader | connected, status, email, token_health, last_sync_at, last_error, granted scope, inbox unread, `sentinel { available, reason? }` |
 | `GET /search?q=&max=` | reader | Gmail search syntax passed through live; metadata only; `max` 1–50 (default 20) |
 | `GET /messages/{id}` | reader | Live `format=full` read: `{metadata, body, truncated, links[], untrusted, note}` |
 | `GET /threads/{id}` | reader | The same, per message (25 most recent) |
@@ -127,18 +127,32 @@ Every message body (`/messages/{id}`, `/threads/{id}`) and every attachment text
   - **`links[]`** come from the visible content only. Links that occur only in hidden regions are returned separately
     in `hiddenLinks[]`, flagged `hidden: true`. The hidden text itself is never returned; only a segment count is.
   - **`sentinel`** is `{ available, risk, signals, handling, isolation, screening, reason?, jobId? }`.
-  - **Empty visible content:** when everything was hidden, the empty `VisibleContent` is trusted. Content that was
-    never screened is screened locally with the model-free pass; raw input is shown only if even that is impossible.
-    Unicode tag characters and other invisible characters are always stripped.
-  - **Header fields:** sender, subject and snippet bypass the model review, so they are cleaned and screened with
-    the model-free pass everywhere (`/messages`, `/threads`, `/search`). Findings appear as `metadata.signals`.
+  - **Empty visible content:** when everything was hidden, the empty `VisibleContent` is trusted. A reviewed item
+    the review did not screen (the Sentinel's unscreened result) is screened locally with the model-free pass; if even
+    that cannot look at it, the item is withheld. Unicode tag characters and other invisible characters are always
+    stripped.
+  - **Header fields:** sender, recipients' names, subject and snippet bypass the model review, so they are cleaned and
+    screened with the model-free `Screen()` pass everywhere (`/messages`, `/threads`, `/search`). Findings appear as
+    `metadata.signals`. Attachment filenames are screened the same way (`signals` on the listing entry).
   - **Snippets:** dropped whenever a body is returned. Gmail's snippet can carry hidden preheader text.
-- **Soft dependency:** Mail never `requires` the capability. Without cap-sentinel, content is returned as before with
-  `sentinel.available=false` (`reason: not_installed`).
+- **If the Sentinel is down, nothing comes in** (Laurent's availability decision: inward and outward are rejected;
+  Mail is inward only):
+  - **cap-sentinel missing, disabled, tripped, or of unreadable status:** every content route (`/search`,
+    `/messages/{id}`, `/threads/{id}`, `/messages/{id}/attachments`, `.../text`) returns **503 `sentinel_unavailable`**
+    with no mail content, before anything is fetched from Gmail. New-mail LIVE notices are skipped (not deferred);
+    health notices still go out. `/status` reports `sentinel { available: false, reason }`. Availability means the
+    review service is registered **and** cap-sentinel's `plugin` entity has status `enabled`: the kernel registers a
+    disabled plugin's services too, and enabling or disabling happens at runtime on that entity. The answer is
+    cached for 5 s; a status that cannot be read counts as unavailable.
+  - **The model review of one item fails, times out, runs out of the request budget, or reports itself unavailable:**
+    that item is withheld: `body: null` (`text: null` for attachments), no `links`/`hiddenLinks`, and
+    `sentinel { available: false, withheld: true, reason }` with `reason` `error`, `timeout`, `model_unavailable` or
+    `screening_unavailable`. Unreviewed body or attachment text is never returned.
+  - **Metadata** (sender, recipients, subject, snippet, attachment filenames) is returned only if `Screen()` ran on it;
+    otherwise only Gmail's ids, labels and date come back, with `withheld: "screening_unavailable"`.
 - **Budgets:** there is one review per item per request, and `/threads` reviews at most 3 messages concurrently. A
-  request has a 60 s review budget. Items still pending when it runs out keep their content, fall back to the
-  Sentinel's model-free screening (which still strips hidden text), and report `available=false` with
-  `reason: timeout`; a failing review reports `reason: error`. The request itself never fails because of the Sentinel.
+  request has a 60 s review budget; items still pending when it runs out are withheld (`reason: timeout`) while the
+  rest of the thread is returned. The request itself never fails because one review did.
 - **Next step:** Sentinel *extraction* (a bounded, validated `?extract=` schema for receipts, bookings and delivery
   notices) is the next step for automations; it is not part of this slice.
 
