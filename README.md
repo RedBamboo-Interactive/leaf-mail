@@ -303,3 +303,13 @@ The tests mock Google at the HTTP handler and make no network calls. The loopbac
 `./build-leafpkg.ps1` builds only. It writes `mail-<version>.leafpkg`, `.sha256` and `package-receipt.json` to
 `$env:REDLEAF_SCRATCH_DIR/leaf-mail/dist`. It refuses a dirty tree unless `-AllowDirty` is passed, builds Leaf.Sdk
 into scratch, and never ships kernel assemblies.
+
+## Release
+
+Release Manager builds Mail with the shared extension recipe from `release/producer-input.v1.json` and
+`scripts/release/metadata.mjs`. The plugin, the Extractor and the tests each commit a `packages.lock.json`, and the
+recipe restores them with `--locked-mode`. After a dependency change, run a plain `dotnet restore` and commit the
+updated lock files. `metadata.mjs` pins the manifest's permissions and slots, so a permission change must be made in
+both files. It also refuses a release if a credential-shaped file (an OAuth client JSON, token or key file, a mail
+export) is committed anywhere, or if a Google client secret or token appears in anything the package is built from.
+Users bring their own Google desktop client.

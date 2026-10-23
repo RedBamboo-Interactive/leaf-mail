@@ -1,0 +1,48 @@
+{
+  "schemaVersion": 1,
+  "inputType": "mail-extension-release-producer-input",
+  "classification": "optional",
+  "component": {
+    "id": "mail",
+    "kind": "extension",
+    "version": "0.1.0"
+  },
+  "redleafReleaseToolCommit": "ef3ca7e53121c2ff7220bb7e0c9ff2d87dc9d3a6",
+  "toolchain": {
+    "node": "22.23.4",
+    "pnpm": "11.0.9",
+    "dotnetSdk": "9.0.303",
+    "msbuild": "17.14.13.31314"
+  },
+  "leafSdk": {
+    "repository": "RedBamboo-Interactive/redleaf",
+    "commit": "ef3ca7e53121c2ff7220bb7e0c9ff2d87dc9d3a6",
+    "sourcePath": "src/Leaf.Sdk"
+  },
+  "redbamboo": {
+    "repository": "RedBamboo-Interactive/redbamboo-packages",
+    "commit": "82fdeb138a351c755769d39b9e6bb58587ff1ed4",
+    "lockPath": "pnpm-lock.yaml",
+    "inputs": [
+      {
+        "id": "redbamboo-ui",
+        "name": "@redbamboo/ui",
+        "sourcePath": "packages/ui"
+      },
+      {
+        "id": "redbamboo-utility",
+        "name": "@redbamboo/utility",
+        "sourcePath": "packages/utility"
+      }
+    ]
+  },
+  "targetPlatform": {
+    "operatingSystem": "windows",
+    "architecture": "x64"
+  },
+  "backendProject": "src/Leaf.Plugins.Mail/Leaf.Plugins.Mail.csproj",
+  "testProject": "tests/Leaf.Plugins.Mail.Tests/Leaf.Plugins.Mail.Tests.csproj",
+  "frontendDirectory": "web",
+  "dependencies": [],
+  "runtimeRequirements": []
+}
