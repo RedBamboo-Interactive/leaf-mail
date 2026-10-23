@@ -66,8 +66,29 @@ They follow the same caller policy as `/messages`.
 - **Supported types:** `application/pdf`, `text/plain`, `text/csv`, `text/html`, `text/calendar` (.ics, unfolded into
   readable lines) and `message/rfc822` (headers + text body). A generic `application/octet-stream` is refined by the PDF
   magic bytes or the file extension. Every other type is `unsupported`.
-- **Statuses:** `ok`, `unsupported`, `unreadable` (malformed, or encrypted / password-protected), `no_text` (e.g. an
-  image-only PDF, including one whose page content stream is itself JPEG-coded; there is no OCR) and `too_large`.
+- **Statuses:** `ok`, `unsupported`, `unreadable` (malformed, encrypted / password-protected, or the extractor helper
+  is missing or failed), `no_text` (e.g. an image-only PDF, including one whose page content stream is itself
+  JPEG-coded; there is no OCR), `too_large`, and `too_complex` (a safe processing limit was reached: memory, time,
+  decompressed size).
+- **Out of process:** PDF, HTML, calendar and message/rfc822 parsing never runs in the RedLeaf process. A 65 KB PDF
+  can make PdfPig build tens of millions of letters (measured: 16 GB allocated, 12 GB peak, 21 s), and content
+  parsing cannot be bounded from inside. Each extraction starts the bundled helper
+  `extractor/Leaf.Plugins.Mail.Extractor.exe`, a small console app compiled from the same extraction sources with no
+  network or file-writing code. The plugin:
+  - resolves it from its own directory only (`backend/extractor/` in a package; beside the newest
+    `src/**/bin/**/Leaf.Plugins.Mail.dll` in a workspace checkout, the kernel's own rule), never from PATH;
+  - starts it with an absolute path, no shell, no window and an empty environment (only `SystemRoot`, `windir`,
+    `DOTNET_ROOT` and diagnostics-off switches), so no execution token or credential is inherited;
+  - assigns it to a new Windows job object before sending any bytes. Job limits: 512 MB committed memory for the
+    job (the helper's GC heap is capped at 75% of that), 15 s user CPU time, 1 active process (it cannot start
+    another), below-normal priority, every UI restriction, die on unhandled exception (no error dialog),
+    kill-on-close;
+  - sends the attachment on stdin and reads at most 8 MB of JSON back from stdout; stderr is drained and discarded;
+  - kills the whole job after 15 s of wall clock, or as soon as the request is aborted.
+
+  Any limit reports `too_complex`; a missing, crashing, or misbehaving helper reports `unreadable`, never an error.
+  The concurrency gate (2) holds until the helper has exited. Plain text and CSV are only decoded up to the text cap
+  and stay in process. Manifest permission: `process` / `Leaf.Plugins.Mail.Extractor.exe`.
 - **Limits:**
   - **Download:** 15 MB, checked against Gmail's part size first and enforced again while reading the response.
     Personal Gmail caps attachments at 25 MB.
@@ -75,8 +96,9 @@ They follow the same caller policy as `/messages`.
     RunLength data is measured with a constant-memory counting decoder before PdfPig decodes it, so a decompression
     bomb is refused before it inflates. Nested filter chains are checked stage by stage; image codecs that expand data
     (CCITT, JBIG2) are refused, since text extraction never needs them. Per document, filters may produce at most 32 MB
-    and the extraction thread may allocate at most 512 MB. At most 2 extractions and 2 downloads run at once,
-    process-wide. Extraction runs off the request thread and stops when the request is aborted.
+    and the extraction thread may allocate at most 512 MB. These checks run inside the helper as a first line, so a
+    bomb is refused in milliseconds instead of at the job limit. At most 2 extractions and 2 downloads run at once,
+    process-wide.
   - **Hidden PDF text:** invisible glyphs (render mode 3/7) with no image beneath them are removed. Over an image
     they are the text layer of a searchable scan and are kept. White or near-white, sub-1pt and off-page glyphs are
     kept and flagged: white headings on coloured bars are ordinary in statements, and the background colour is not
@@ -84,10 +106,12 @@ They follow the same caller policy as `/messages`.
     `pdf_tiny_text`, `pdf_off_page_text`). Text always keeps the content-stream order of PdfPig's
     `ContentOrderTextExtractor`; when glyphs are removed, the same algorithm runs over the kept ones.
   - **Text:** capped at 20 000 characters, with `truncated`.
-- **Nothing is executed, rendered, or opened by an external program.** Bytes and text exist only in memory for the
+- **Nothing in the attachment is executed, rendered, or opened by another program**; the only process started is
+  the bundled extractor helper above. Bytes and text exist only in memory (and in the pipe to the helper) for the
   request and are cleared afterwards; nothing is written to records, entities, or disk.
 - **Libraries:** [PdfPig](https://github.com/UglyToad/PdfPig) 0.1.16 (Apache-2.0) for PDF text, and
-  [MimeKitLite](https://www.mimekit.net/) 4.18.1 (MIT) for message/rfc822. Neither has dependencies on net9.0.
+  [MimeKitLite](https://www.mimekit.net/) 4.18.1 (MIT) for message/rfc822. Neither has dependencies on net9.0. Both ship twice: beside the plugin (plain text, CSV) and
+  beside the helper.
 
 ### Sentinel review
 
