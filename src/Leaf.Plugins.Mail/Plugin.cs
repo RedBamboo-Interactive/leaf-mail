@@ -70,6 +70,8 @@ public sealed class MailPlugin : ILeafPlugin
             sp.GetRequiredKeyedService<IPluginExtensions>(PluginId),
             sp.GetRequiredService<MailStore>(),
             sp.GetRequiredService<MailLiveOutbox>()));
+        services.AddSingleton(sp => new MailAgentSkills(
+            sp.GetRequiredKeyedService<IEntityStore>(PluginId), sp.GetService<ILogger<MailAgentSkills>>()));
         services.AddSingleton<IPluginSettingsProvider>(sp => new MailSettingsProvider(sp.GetRequiredService<MailStore>()));
     }
 

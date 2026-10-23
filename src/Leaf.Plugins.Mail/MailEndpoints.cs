@@ -124,20 +124,29 @@ internal static class MailEndpoints
             });
         });
 
-        group.MapPut("/config", async (HttpContext c, MailStore store, MailService service, MailPoller poller) =>
+        group.MapPut("/config", async (HttpContext c, MailStore store, MailService service, MailPoller poller, MailAgentSkills skills) =>
         {
             var caller = OwnerUser(c);
             var body = await ReadJsonAsync(c);
             var patch = await ValidateConfigAsync(body, caller, store, c.RequestAborted);
             await store.ClaimOwnerAsync(caller.UserId, caller.IsAdmin, c.RequestAborted);
+            IReadOnlyList<SkillAssignment>? assignments = null;
             if (patch.Remove("agent_id", out var agent))
-                await store.SetAgentAsync(agent?.GetValue<string>(), c.RequestAborted);
+            {
+                var previous = (await store.GetPolicyAsync(c.RequestAborted)).AgentId;
+                var next = (await store.SetAgentAsync(agent?.GetValue<string>(), c.RequestAborted)).AgentId;
+                // The binding is authoritative; skill assignment follows it and reports per agent.
+                assignments = await skills.SyncAsync(previous, next, caller.UserId, c.RequestAborted);
+            }
             // Owner-session-only (OwnerUser above): the explicit LIVE approval.
             if (patch.Remove("live_approved", out var approved))
                 await store.SetLiveApprovalAsync(approved!.GetValue<bool>(), caller.UserId, c.RequestAborted);
             if (patch.Count > 0) await store.PatchConfigAsync(patch, c.RequestAborted);
             poller.Wake();
-            return Results.Ok(await service.StatusAsync(c.RequestAborted));
+            var status = await service.StatusAsync(c.RequestAborted);
+            if (assignments != null)
+                status["skill_assignment"] = new JsonArray(assignments.Select(a => (JsonNode)a.ToJson()).ToArray());
+            return Results.Ok(status);
         });
 
         group.MapPut("/client", async (HttpContext c, MailStore store, MailService service, MailPoller poller) =>

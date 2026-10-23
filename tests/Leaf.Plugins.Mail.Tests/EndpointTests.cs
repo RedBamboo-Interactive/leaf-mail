@@ -46,6 +46,7 @@ public sealed class EndpointTests : IAsyncLifetime
                 services.AddSingleton(_h.Service);
                 services.AddSingleton(new MailConsent(_h.Store, _h.OAuth, _h.Service, startListener: false));
                 services.AddSingleton(new MailPoller(_h.Service));
+                services.AddSingleton(new MailAgentSkills(_h.Entities));
             })
             .Configure(app =>
             {
@@ -231,6 +232,24 @@ public sealed class EndpointTests : IAsyncLifetime
     [InlineData("/messages/m7/attachments/a%20b/text")]
     public async Task Malformed_attachment_ids_are_rejected(string path)
         => Assert.Equal(HttpStatusCode.BadRequest, (await Send(HttpMethod.Get, path, "owner")).StatusCode);
+
+    [Fact]
+    public async Task Binding_an_agent_reports_the_skill_assignment()
+    {
+        var plugin = (await _h.Entities.GetBySlugAsync("plugin", "mail"))!;
+        _h.Entities.AddWithId(Guid.Parse("949dfba3-0e3d-595d-8bf1-e1c0b64c11d8"), "agent-skill", "mail",
+            new JsonObject { ["owner_plugin"] = plugin.Id.ToString() });
+        var muse = _h.Entities.AddWithId(Guid.Parse("b2000000-0000-0000-0000-000000000002"), "agent", "muse", new JsonObject());
+
+        var response = await Send(HttpMethod.Put, "/config", "owner", $$"""{"agent_id":"{{muse.Id}}"}""");
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var assignments = JsonNode.Parse(await response.Content.ReadAsStringAsync())!["skill_assignment"]!.AsArray();
+        Assert.Contains(assignments, a => a!["agentId"]!.GetValue<string>() == muse.Id.ToString() && a["status"]!.GetValue<string>() == "added");
+        var skills = (await _h.Entities.GetAsync(muse.Id))!.Data["skills"]!.AsArray().Select(s => s!.GetValue<string>());
+        Assert.Equal(["949dfba3-0e3d-595d-8bf1-e1c0b64c11d8"], skills);
+        // The bound agent cannot do this for itself: settings are owner-session only.
+        Assert.Equal(HttpStatusCode.Forbidden, (await Send(HttpMethod.Put, "/config", "agent", $$"""{"agent_id":"{{muse.Id}}"}""")).StatusCode);
+    }
 
     [Fact]
     public async Task Owner_can_bind_agent_and_filters_but_not_unknown_settings()
