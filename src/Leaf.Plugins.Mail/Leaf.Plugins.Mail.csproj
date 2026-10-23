@@ -6,6 +6,12 @@
     <Nullable>enable</Nullable>
     <RootNamespace>Leaf.Plugins.Mail</RootNamespace>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <!-- RedLeaf loads workspace plugins through a private AssemblyLoadContext from the
+         checkout's build output. Library projects do not otherwise copy NuGet runtime
+         dependencies beside their assembly, so PdfPig and MimeKitLite would be missing
+         (FileNotFoundException on the first PDF or .eml). Same convention as leaf-discord.
+         Leaf.Sdk stays Private=false: the kernel supplies it. -->
+    <EnableDynamicLoading>true</EnableDynamicLoading>
   </PropertyGroup>
 
   <ItemGroup>
