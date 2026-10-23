@@ -15,6 +15,9 @@ public sealed class GmailApiException(HttpStatusCode status, string message) : E
     public bool Transient => (int)Status == 429 || (int)Status >= 500;
 }
 
+/// <summary>The attachment exceeds the download cap; nothing beyond the cap was kept.</summary>
+public sealed class AttachmentTooLargeException() : Exception("The attachment exceeds the download limit");
+
 public interface IMailAccessTokens
 {
     Task<string> GetAccessTokenAsync(CancellationToken ct);
@@ -142,6 +145,50 @@ public sealed class GmailClient(HttpClient http, GoogleEndpoints endpoints, IMai
         if (!IsValidId(messageId) || !AttachmentIdShape.IsMatch(attachmentId))
             throw new ArgumentException("Invalid message or attachment id");
         return GetJsonAsync($"/messages/{messageId}/attachments/{attachmentId}", ct);
+    }
+
+    /// <summary>
+    /// users.messages.attachments.get, decoded to bytes in memory. The response is read with a
+    /// hard bound (base64url of <paramref name="maxBytes"/> plus envelope), so a part whose size
+    /// field understates its content still cannot exceed the cap. Nothing touches disk.
+    /// </summary>
+    public async Task<byte[]> GetAttachmentBytesAsync(string messageId, string attachmentId, long maxBytes, CancellationToken ct)
+    {
+        if (!IsValidId(messageId) || !AttachmentIdShape.IsMatch(attachmentId))
+            throw new ArgumentException("Invalid message or attachment id");
+        var maxResponse = maxBytes / 3 * 4 + 8 + 64 * 1024;
+        using var response = await SendAsync(() => new HttpRequestMessage(HttpMethod.Get,
+            endpoints.GmailBase + $"/messages/{messageId}/attachments/{attachmentId}"), ct);
+        if (response.Content.Headers.ContentLength > maxResponse) throw new AttachmentTooLargeException();
+        await using var stream = await response.Content.ReadAsStreamAsync(ct);
+        using var buffer = new MemoryStream();
+        var chunk = new byte[81920];
+        int read;
+        while ((read = await stream.ReadAsync(chunk, ct)) > 0)
+        {
+            if (buffer.Length + read > maxResponse) throw new AttachmentTooLargeException();
+            buffer.Write(chunk, 0, read);
+        }
+        string? data;
+        try
+        {
+            using var doc = JsonDocument.Parse(buffer.GetBuffer().AsMemory(0, (int)buffer.Length));
+            data = doc.RootElement.TryGetProperty("data", out var d) ? d.GetString() : null;
+        }
+        catch (JsonException) { throw new GmailApiException(HttpStatusCode.BadGateway, "Gmail returned an unreadable attachment"); }
+        finally { Array.Clear(buffer.GetBuffer()); }
+        if (string.IsNullOrEmpty(data)) return [];
+        var bytes = DecodeBase64Url(data);
+        if (bytes.Length > maxBytes) { Array.Clear(bytes); throw new AttachmentTooLargeException(); }
+        return bytes;
+    }
+
+    internal static byte[] DecodeBase64Url(string data)
+    {
+        var normalized = data.Replace('-', '+').Replace('_', '/');
+        normalized = normalized.PadRight(normalized.Length + (4 - normalized.Length % 4) % 4, '=');
+        try { return Convert.FromBase64String(normalized); }
+        catch (FormatException) { throw new GmailApiException(HttpStatusCode.BadGateway, "Gmail returned an undecodable attachment"); }
     }
 
     public Task<JsonDocument> GetThreadAsync(string id, CancellationToken ct)

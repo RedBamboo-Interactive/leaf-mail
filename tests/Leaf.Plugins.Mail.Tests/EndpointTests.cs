@@ -191,6 +191,47 @@ public sealed class EndpointTests : IAsyncLifetime
         Assert.Contains(_h.Google.Requests, r => r.Url.Contains("q=from%3Ashop%20newer_than%3A1h&maxResults=5"));
     }
 
+    private void AttachmentFixtures()
+    {
+        _h.TokenOk();
+        _h.Google.Json(HttpMethod.Get, Harness.Gmail + "/messages/m7?format=full", AttachmentServiceTests.MessageWithAttachments());
+        _h.Google.Json(HttpMethod.Get, Harness.Gmail + "/messages/m7/attachments/ANGjdJ_pdf", new JsonObject
+        {
+            ["data"] = Convert.ToBase64String(PdfFixtures.Text("Delivery notice")).TrimEnd('=').Replace('+', '-').Replace('/', '_'),
+        }.ToJsonString());
+    }
+
+    [Theory]
+    [InlineData("local", HttpStatusCode.Unauthorized)]
+    [InlineData("anonymous", HttpStatusCode.Unauthorized)]
+    [InlineData("discord", HttpStatusCode.Forbidden)]
+    [InlineData("other-agent", HttpStatusCode.Forbidden)]
+    [InlineData("other-user", HttpStatusCode.Forbidden)]
+    [InlineData("owner", HttpStatusCode.OK)]
+    [InlineData("agent", HttpStatusCode.OK)]
+    public async Task Attachment_routes_apply_the_same_caller_policy_as_messages(string principal, HttpStatusCode expected)
+    {
+        AttachmentFixtures();
+        var list = await Send(HttpMethod.Get, "/messages/m7/attachments", principal);
+        Assert.Equal(expected, list.StatusCode);
+        var text = await Send(HttpMethod.Get, "/messages/m7/attachments/ANGjdJ_pdf/text", principal);
+        Assert.Equal(expected, text.StatusCode);
+        if (expected == HttpStatusCode.OK)
+        {
+            var json = JsonNode.Parse(await text.Content.ReadAsStringAsync())!;
+            Assert.Equal("Delivery notice", json["text"]!.GetValue<string>());
+            Assert.True(json["untrusted"]!.GetValue<bool>());
+        }
+        else Assert.DoesNotContain(_h.Google.Requests, r => r.Url.Contains("/attachments/"));
+    }
+
+    [Theory]
+    [InlineData("/messages/m7/attachments/..%2F..%2Fprofile/text")]
+    [InlineData("/messages/m7/attachments/inline.x/text")]
+    [InlineData("/messages/m7/attachments/a%20b/text")]
+    public async Task Malformed_attachment_ids_are_rejected(string path)
+        => Assert.Equal(HttpStatusCode.BadRequest, (await Send(HttpMethod.Get, path, "owner")).StatusCode);
+
     [Fact]
     public async Task Owner_can_bind_agent_and_filters_but_not_unknown_settings()
     {

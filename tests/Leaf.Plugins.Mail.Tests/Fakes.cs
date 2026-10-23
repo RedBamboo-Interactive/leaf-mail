@@ -43,9 +43,15 @@ internal sealed class MemoryEntities : IEntityStore
         return Task.FromResult(Put(entity));
     }
 
+    /// <summary>When set, writes behave like the kernel's plugin-scoped store for this plugin entity.</summary>
+    public Guid? PluginEntityId;
+
     public Task<LeafEntity> PatchAsync(Guid id, JsonObject dataPatch, string? name = null, CancellationToken ct = default)
     {
         var existing = _items[id];
+        if (PluginEntityId is { } mine && existing.Data["owner_plugin"] is JsonValue op
+            && op.TryGetValue<string>(out var owner) && Guid.TryParse(owner, out var ownerId) && ownerId != mine)
+            throw new InvalidOperationException($"Plugin 'mail' cannot modify entity '{existing.Slug}' -- it is owned by another plugin");
         if (FailWrite?.Invoke(existing.TypeSlug, dataPatch) is { } failure) throw failure;
         var data = existing.Data.DeepClone().AsObject();
         foreach (var (key, value) in dataPatch) data[key] = value?.DeepClone();
@@ -85,6 +91,9 @@ internal sealed class MemoryEntities : IEntityStore
         _items.TryRemove(id, out _);
         return Task.CompletedTask;
     }
+
+    public LeafEntity AddWithId(Guid id, string type, string slug, JsonObject data)
+        => Put(new LeafEntity(id, type, slug, slug, data, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, null));
 
     public LeafEntity Add(string type, string slug, JsonObject data)
         => Put(new LeafEntity(Guid.NewGuid(), type, slug, slug, data, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, null));
@@ -195,6 +204,7 @@ internal sealed class Harness
     public const string ClientId = "123456789012-abcdefghijklmnop0123456789abcdef.apps.googleusercontent.com";
     public const string ClientSecret = "GOCSPX-test_secret_value";
     public const string Gmail = "https://gmail.googleapis.com/gmail/v1/users/me";
+    public static readonly MailCaller OwnerCaller = new(MailCallerKind.OwnerUser, Owner, null, null);
 
     public readonly MemoryEntities Entities = new();
     public readonly MemoryRecords Records = new();
@@ -209,15 +219,18 @@ internal sealed class Harness
     public readonly MailService Service;
     public readonly List<PluginLiveEventProjection> Live = [];
 
-    public Harness()
+    public readonly LeafEntity MailPluginEntity;
+
+    public Harness(Leaf.Sdk.Services.IUntrustedContentReview? review = null)
     {
+        MailPluginEntity = Entities.Add("plugin", "mail", new JsonObject());
         var http = new HttpClient(Google);
         Store = new MailStore(Entities);
         OAuth = new GoogleOAuthClient(http, Endpoints);
         Tokens = new MailTokenCache(OAuth, Store);
         Gmail_ = new GmailClient(http, Endpoints, Tokens, new MailBackoff((_, _) => Task.CompletedTask));
         Outbox = new MailLiveOutbox(Events, async ct => (await Store.GetPolicyAsync(ct), await Store.GetLiveApprovalAsync(ct)));
-        Service = new MailService(Store, Tokens, Gmail_, OAuth, Records, Outbox);
+        Service = new MailService(Store, Tokens, Gmail_, OAuth, Records, Outbox, sentinel: new MailSentinel(review));
         // Behave like the kernel registry: the projector resolves each nonce event.
         Events.OnPublish = async evt =>
         {

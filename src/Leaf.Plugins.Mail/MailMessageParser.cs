@@ -132,7 +132,8 @@ public static class MailMessageParser
     /// <c>messages.attachments.get</c>). <see cref="Size"/> is Gmail's byte count.
     /// </summary>
     public sealed record Part(string MimeType, string? Filename, string? Data, string? AttachmentId,
-        string? Charset, bool IsAttachment, long Size = 0);
+        string? Charset, bool IsAttachment, long Size = 0, string? PartId = null, string? Disposition = null,
+        string? ContentId = null);
 
     public static IEnumerable<Part> Parts(JsonElement payload)
     {
@@ -160,8 +161,12 @@ public static class MailMessageParser
         var charset = CharsetOf(contentType);
         var isAttachment = !string.IsNullOrEmpty(filename)
             || disposition.TrimStart().StartsWith("attachment", StringComparison.OrdinalIgnoreCase);
+        var partId = payload.TryGetProperty("partId", out var pid) ? pid.GetString() : null;
+        var contentId = headers.GetValueOrDefault("content-id") ?? headers.GetValueOrDefault("x-attachment-id");
         yield return new Part(mime.ToLowerInvariant(), string.IsNullOrEmpty(filename) ? null : filename,
-            string.IsNullOrEmpty(data) ? null : data, attachmentId, charset, isAttachment, size);
+            string.IsNullOrEmpty(data) ? null : data, attachmentId, charset, isAttachment, size,
+            string.IsNullOrEmpty(partId) ? null : partId, string.IsNullOrWhiteSpace(disposition) ? null : disposition.Trim(),
+            string.IsNullOrWhiteSpace(contentId) ? null : contentId);
     }
 
     private static string? CharsetOf(string contentType)

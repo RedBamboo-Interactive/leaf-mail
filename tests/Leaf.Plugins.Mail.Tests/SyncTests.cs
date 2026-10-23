@@ -239,7 +239,7 @@ public sealed class SyncTests
              "headers":[{"name":"From","value":"A <a@example.com>"},{"name":"Subject","value":"S"},{"name":"Content-Type","value":"text/html; charset=utf-8"}],
              "body":{"data":"DATA"}}}
             """.Replace("DATA", data));
-        var result = await h.Service.MessageAsync("m9", default);
+        var result = await h.Service.MessageAsync("m9", Harness.OwnerCaller, default);
         Assert.True(result["untrusted"]!.GetValue<bool>());
         Assert.Equal("Hello here [link 1]", result["body"]!.GetValue<string>());
         Assert.Equal("https://example.com/x", result["links"]![0]!["href"]!.GetValue<string>());

@@ -37,6 +37,9 @@ public sealed record MailCaller(MailCallerKind Kind, string UserId, string? Agen
     /// <summary>Host-issued "admin" role on a plain user session (required for the first owner claim).</summary>
     public bool IsAdmin { get; init; }
 
+    /// <summary>The verified private discussion(s) an agent caller works in (for audit provenance).</summary>
+    public IReadOnlyList<string> DiscussionIds { get; init; } = [];
+
     public const string NovaAppId = "nova";
     public const string MailAppId = "mail";
     public const string NovaDiscussionRoutePrefix = "/api/apps/nova/discussions/";
@@ -100,7 +103,7 @@ public sealed record MailCaller(MailCallerKind Kind, string UserId, string? Agen
             foreach (var discussion in execution.DiscussionIds)
                 if (!await discussions(discussion, policy.OwnerUserId, policy.AgentId, ct))
                     throw new MailFault("private_discussion_required", 403);
-            return new(MailCallerKind.Agent, subject!, agent, execution.ExecutionId);
+            return new(MailCallerKind.Agent, subject!, agent, execution.ExecutionId) { DiscussionIds = execution.DiscussionIds };
         }
 
         // Mail's own browser app (same shape Body accepts for its app): root execution,

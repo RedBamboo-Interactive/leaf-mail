@@ -12,6 +12,13 @@
     <FrameworkReference Include="Microsoft.AspNetCore.App" />
   </ItemGroup>
 
+  <!-- Attachment text extraction (read-only, in memory). PdfPig: Apache-2.0, no dependencies
+       on net9.0. MimeKitLite: MIT, no dependencies on net8.0+ (message/rfc822 parsing). -->
+  <ItemGroup>
+    <PackageReference Include="PdfPig" Version="0.1.16" />
+    <PackageReference Include="MimeKitLite" Version="4.18.1" />
+  </ItemGroup>
+
   <!-- Leaf.Sdk is the only backend source input and the kernel supplies it at load
        time, so it is referenced with Private=false and never copied. An explicit
        -p:LeafSdkProject=<path> or -p:LeafSdkAssembly=<dll> wins; otherwise a sibling

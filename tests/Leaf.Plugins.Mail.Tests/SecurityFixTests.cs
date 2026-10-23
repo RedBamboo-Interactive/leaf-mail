@@ -518,7 +518,7 @@ public sealed class SecurityFixTests
         h.Google.Json(HttpMethod.Get, Harness.Gmail + "/messages/m5/attachments/ANGjdJ_external-1",
             new JsonObject { ["size"] = 40, ["data"] = B64("<p>Large <a href=\"https://example.com/z\">body</a></p>") }.ToJsonString());
 
-        var message = await h.Service.MessageAsync("m5", default);
+        var message = await h.Service.MessageAsync("m5", Harness.OwnerCaller, default);
         Assert.Equal("Large body [link 1]", message["body"]!.GetValue<string>());
         Assert.Equal("text/html", message["bodySource"]!.GetValue<string>());
         Assert.Single(h.Google.Requests, r => r.Url.Contains("/attachments/ANGjdJ_external-1"));
@@ -531,7 +531,7 @@ public sealed class SecurityFixTests
         await h.ConfigureAsync();
         h.TokenOk();
         h.Google.Json(HttpMethod.Get, Harness.Gmail + "/messages/m5?format=full", Externalized("text/html", 50_000_000));
-        var message = await h.Service.MessageAsync("m5", default);
+        var message = await h.Service.MessageAsync("m5", Harness.OwnerCaller, default);
         Assert.Equal("", message["body"]!.GetValue<string>());
         Assert.True(message["truncated"]!.GetValue<bool>());
         Assert.StartsWith("unavailable", message["bodySource"]!.GetValue<string>());
@@ -545,7 +545,7 @@ public sealed class SecurityFixTests
         await h.ConfigureAsync();
         h.TokenOk();
         h.Google.Json(HttpMethod.Get, Harness.Gmail + "/messages/m5?format=full", Externalized("text/plain", 100, "notes.txt"));
-        var message = await h.Service.MessageAsync("m5", default);
+        var message = await h.Service.MessageAsync("m5", Harness.OwnerCaller, default);
         Assert.Equal("none", message["bodySource"]!.GetValue<string>());
         Assert.DoesNotContain(h.Google.Requests, r => r.Url.Contains("/attachments/"));
     }

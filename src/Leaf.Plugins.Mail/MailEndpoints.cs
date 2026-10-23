@@ -77,13 +77,27 @@ internal static class MailEndpoints
         group.MapGet("/messages/{id}", async (string id, HttpContext c, MailService service) =>
         {
             if (!GmailClient.IsValidId(id)) throw new ArgumentException("Invalid message id");
-            return Results.Ok(await service.MessageAsync(id, c.RequestAborted));
+            return Results.Ok(await service.MessageAsync(id, Reader(c), c.RequestAborted));
         });
 
         group.MapGet("/threads/{id}", async (string id, HttpContext c, MailService service) =>
         {
             if (!GmailClient.IsValidId(id)) throw new ArgumentException("Invalid thread id");
-            return Results.Ok(await service.ThreadAsync(id, c.RequestAborted));
+            return Results.Ok(await service.ThreadAsync(id, Reader(c), c.RequestAborted));
+        });
+
+        // Attachments: same caller policy as /messages (the group filter), read live, never stored.
+        group.MapGet("/messages/{id}/attachments", async (string id, HttpContext c, MailService service) =>
+        {
+            if (!GmailClient.IsValidId(id)) throw new ArgumentException("Invalid message id");
+            return Results.Ok(await service.AttachmentsAsync(id, c.RequestAborted));
+        });
+
+        group.MapGet("/messages/{id}/attachments/{attachmentId}/text", async (string id, string attachmentId, HttpContext c, MailService service) =>
+        {
+            if (!GmailClient.IsValidId(id)) throw new ArgumentException("Invalid message id");
+            if (!IsAttachmentId(attachmentId)) throw new ArgumentException("Invalid attachment id");
+            return Results.Ok(await service.AttachmentTextAsync(id, attachmentId, Reader(c), c.RequestAborted));
         });
 
         // ── Owner-only settings and OAuth ─────────────────────────────────────
@@ -181,6 +195,13 @@ internal static class MailEndpoints
 
     private static string? SameOriginPath(string? value)
         => value is { Length: > 1 and <= 512 } && value[0] == '/' && value[1] != '/' && !value.Contains('\\') ? value : null;
+
+    private static MailCaller Reader(HttpContext c) => (MailCaller)c.Items[CallerKey]!;
+
+    private static readonly System.Text.RegularExpressions.Regex AttachmentIdShape =
+        new(@"^(?:[A-Za-z0-9_-]{1,2048}|inline\.[0-9.]{1,32})$", System.Text.RegularExpressions.RegexOptions.Compiled);
+
+    internal static bool IsAttachmentId(string? id) => id != null && AttachmentIdShape.IsMatch(id);
 
     private static MailCaller OwnerUser(HttpContext c)
     {

@@ -2,7 +2,7 @@
   "id": "mail",
   "name": "Mail",
   "version": "0.1.0",
-  "kernelApi": "^0.1.0",
+  "kernelApi": "^0.1.2",
   "description": "Read-only Gmail access for the owner and their bound agent: status, search, message and thread reads, and LIVE new-mail notices.",
   "icon": "ph-envelope-simple",
   "color": "sky",
