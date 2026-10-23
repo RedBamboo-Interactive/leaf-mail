@@ -134,8 +134,8 @@ internal static class MailEndpoints
             IReadOnlyList<SkillAssignment>? assignments = null;
             if (patch.Remove("agent_id", out var agent))
             {
-                var previous = (await store.GetPolicyAsync(c.RequestAborted)).AgentId;
-                var next = (await store.SetAgentAsync(agent?.GetValue<string>(), c.RequestAborted)).AgentId;
+                var (previous, bound) = await store.SetAgentAsync(agent?.GetValue<string>(), c.RequestAborted);
+                var next = bound.AgentId;
                 // The binding is authoritative; skill assignment follows it and reports per agent.
                 assignments = await skills.SyncAsync(previous, next, caller.UserId, c.RequestAborted);
             }

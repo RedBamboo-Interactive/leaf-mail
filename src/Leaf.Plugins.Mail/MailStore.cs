@@ -146,18 +146,21 @@ public sealed class MailStore(IEntityStore entities, ILogger<MailStore>? logger 
     }
 
     /// <summary>Binds (or, with null, unbinds) the agent. The caller must already be the owner.</summary>
-    public async Task<MailPolicy> SetAgentAsync(string? agentId, CancellationToken ct = default)
+    /// <summary>Returns the agent bound before this change, read inside the binding gate so
+    /// concurrent rebinds each see the binding they actually replaced.</summary>
+    public async Task<(string? Previous, MailPolicy Next)> SetAgentAsync(string? agentId, CancellationToken ct = default)
     {
-        var policy = await GetPolicyAsync(ct);
-        if (policy.OwnerUserId == null) throw new MailFault("owner_required", 403);
+        await GetPolicyAsync(ct);
         await _bindingGate.WaitAsync(ct);
         try
         {
+            var policy = _pinned ?? throw new MailFault("mail_binding_untrusted", 409);
+            if (policy.OwnerUserId == null) throw new MailFault("owner_required", 403);
             var next = policy with { AgentId = agentId };
             await WriteBindingAsync(await EnsureConfigAsync(ct), next, ct);
             _pinned = next;
             await EnsureAccountBindingAsync(next, ct);
-            return next;
+            return (policy.AgentId, next);
         }
         finally { _bindingGate.Release(); }
     }

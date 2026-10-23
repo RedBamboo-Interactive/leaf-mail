@@ -453,4 +453,20 @@ public sealed class AttachmentRound2Tests(ITestOutputHelper output)
         Assert.True(allocated < 60L * 1024 * 1024, $"allocated {allocated}");
     }
 
+    [Fact]
+    public async Task Concurrent_rebinds_each_report_the_agent_they_replaced()
+    {
+        var h = new Harness();
+        await h.ConfigureAsync();
+        var a = "a1000000-0000-0000-0000-000000000001";
+        var b = "b2000000-0000-0000-0000-000000000002";
+        var results = await Task.WhenAll(
+            Task.Run(() => h.Store.SetAgentAsync(a)),
+            Task.Run(() => h.Store.SetAgentAsync(b)));
+        var final = (await h.Store.GetPolicyAsync()).AgentId;
+        var first = results.Single(r => r.Previous == Harness.Agent);
+        var second = results.Single(r => r != first);
+        Assert.Equal(first.Next.AgentId, second.Previous);
+        Assert.Equal(second.Next.AgentId, final);
+    }
 }
