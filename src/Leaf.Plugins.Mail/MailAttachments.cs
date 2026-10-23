@@ -293,9 +293,11 @@ public static class AttachmentExtractor
             var (glyphNotes, signals) = GlyphReport(glyphs);
             notes.AddRange(glyphNotes);
             var detail = notes.Count > 0 ? string.Join("; ", notes) : null;
+            var noText = budget.ImageCodedContentStreams > 0
+                ? "The PDF is image-only (its page content is a JPEG image); OCR is not available"
+                : "The PDF has no extractable text (it may be scanned images; OCR is not available)";
             return string.IsNullOrWhiteSpace(text)
-                ? new ExtractedAttachment(AttachmentStatus.NoText, "", false, false, kind,
-                    detail ?? "The PDF has no extractable text (it may be scanned images; OCR is not available)", pages, Stats(), signals)
+                ? new ExtractedAttachment(AttachmentStatus.NoText, "", false, false, kind, detail ?? noText, pages, Stats(), signals)
                 : new ExtractedAttachment(AttachmentStatus.Ok, text, false, truncated, kind, detail, pages, Stats(), signals);
         }
     }

@@ -257,6 +257,43 @@ public sealed class DecodeBoundsTests
     }
 }
 
+public sealed class PdfImageContentTests
+{
+    private static readonly byte[] Jpeg = [0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0x00, 0x01, 0x01, 0x00,
+        0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0xFF, 0xDB, 0x00, 0x43, 0x00, 0x08, 0x06, 0x06, 0x07, 0x06, 0x05, 0xFF, 0xD9];
+
+    [Fact]
+    public void Content_stream_marked_dct_is_image_only_not_malformed()
+    {
+        var result = AttachmentExtractor.Extract(HostilePdf.Document((Jpeg, "/DCTDecode")), "application/pdf", "scan.pdf", null);
+        Assert.Equal(AttachmentStatus.NoText, result.Status);
+        Assert.Contains("image", result.Detail);
+        Assert.DoesNotContain("malformed", result.Detail);
+    }
+
+    [Theory]
+    [InlineData("/JPXDecode")]
+    [InlineData("[/FlateDecode /DCTDecode]")]
+    public void Other_image_coded_content_streams_are_image_only(string filters)
+    {
+        var data = filters.Contains("Flate") ? HostilePdf.Zlib(Jpeg) : Jpeg;
+        var result = AttachmentExtractor.Extract(HostilePdf.Document((data, filters)), "application/pdf", "scan.pdf", null);
+        Assert.Equal(AttachmentStatus.NoText, result.Status);
+        Assert.DoesNotContain("malformed", result.Detail);
+    }
+
+    [Fact]
+    public void Text_streams_beside_an_image_coded_stream_are_still_read()
+    {
+        var text = "BT /F1 12 Tf 50 700 Td (Parcel 12345) Tj ET"u8.ToArray();
+        var pdf = Encoding.Latin1.GetString(HostilePdf.Document((text, "[]"), (Jpeg, "/DCTDecode")))
+            .Replace("/MediaBox [0 0 612 792]", "/MediaBox [0 0 612 792] /Resources << /Font << /F1 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> >> >>");
+        var result = AttachmentExtractor.Extract(Encoding.Latin1.GetBytes(pdf), "application/pdf", "notice.pdf", null);
+        Assert.Equal(AttachmentStatus.Ok, result.Status);
+        Assert.Contains("Parcel 12345", result.Content);
+    }
+}
+
 public sealed class PdfHiddenTextTests
 {
     private static readonly byte[] Png = Convert.FromBase64String(

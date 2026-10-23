@@ -39,6 +39,11 @@ public sealed class PdfBudget(long maxDecodedBytes, long maxAllocatedBytes, Time
     }
 
     public void Add(long bytes) => _decoded += bytes;
+
+    /// <summary>Non-image streams (page content) that were JPEG- or JPEG 2000-coded: an image-only page.</summary>
+    public int ImageCodedContentStreams { get; private set; }
+
+    public void CountImageCodedContent() => ImageCodedContentStreams++;
 }
 
 /// <summary>
@@ -47,7 +52,8 @@ public sealed class PdfBudget(long maxDecodedBytes, long maxAllocatedBytes, Time
 /// decoder that uses constant memory and stops one byte past the remaining budget; only a stream
 /// that fits is handed to PdfPig (which keeps its predictors and leniency). Nested filter chains
 /// are checked stage by stage. Image codecs that expand data (CCITT, JBIG2) are refused: text
-/// extraction never needs them.
+/// extraction never needs them. A content stream coded as JPEG or JPEG 2000 holds no operators,
+/// only an image: it decodes to nothing and is counted, so the page reads as image-only.
 /// </summary>
 internal sealed class BoundedFilterProvider(PdfBudget budget) : IFilterProvider
 {
@@ -67,6 +73,11 @@ internal sealed class BoundedFilterProvider(PdfBudget budget) : IFilterProvider
         public Memory<byte> Decode(Memory<byte> input, DictionaryToken streamDictionary, IFilterProvider filterProvider, int filterIndex)
         {
             budget.Check();
+            if (inner is DctDecodeFilter or JpxDecodeFilter && !IsImage(streamDictionary))
+            {
+                budget.CountImageCodedContent();
+                return Memory<byte>.Empty;
+            }
             var limit = budget.Remaining;
             var bound = inner switch
             {
@@ -85,6 +96,10 @@ internal sealed class BoundedFilterProvider(PdfBudget budget) : IFilterProvider
             budget.Check();
             return output;
         }
+
+        /// <summary>An image XObject or an inline image (which uses abbreviated keys).</summary>
+        private static bool IsImage(DictionaryToken stream)
+            => stream.Data.ContainsKey("Subtype") || stream.Data.ContainsKey("Width") || stream.Data.ContainsKey("W");
     }
 }
 

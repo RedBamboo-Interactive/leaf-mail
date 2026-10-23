@@ -67,7 +67,7 @@ They follow the same caller policy as `/messages`.
   readable lines) and `message/rfc822` (headers + text body). A generic `application/octet-stream` is refined by the PDF
   magic bytes or the file extension. Every other type is `unsupported`.
 - **Statuses:** `ok`, `unsupported`, `unreadable` (malformed, or encrypted / password-protected), `no_text` (e.g. an
-  image-only PDF; there is no OCR) and `too_large`.
+  image-only PDF, including one whose page content stream is itself JPEG-coded; there is no OCR) and `too_large`.
 - **Limits:**
   - **Download:** 15 MB, checked against Gmail's part size first and enforced again while reading the response.
     Personal Gmail caps attachments at 25 MB.
