@@ -65,11 +65,11 @@ public sealed class EndpointTests : IAsyncLifetime
         {
             Principals["owner"] = CallerTests.User();
             Principals["local"] = CallerTests.User(authType: "LocalDefault");
-            Principals["agent"] = CallerTests.Execution(CallerTests.PrivateNovaAgent());
-            Principals["discord"] = CallerTests.Execution(CallerTests.PrivateNovaAgent(extraContext:
-                new JsonObject { ["kind"] = "external-conversation", ["id"] = "discord:1:2" }));
+            Principals["agent"] = CallerTests.Execution(CallerTests.NovaAgent());
+            Principals["discord"] = CallerTests.Execution(CallerTests.DiscordNovaAgent());
+            Principals["automation"] = CallerTests.Execution(CallerTests.AutomationAgent());
             Principals["other-user"] = CallerTests.User("33333333-3333-3333-3333-333333333333");
-            Principals["other-agent"] = CallerTests.Execution(CallerTests.PrivateNovaAgent(agent: "44444444-4444-4444-4444-444444444444"));
+            Principals["other-agent"] = CallerTests.Execution(CallerTests.NovaAgent(agent: "44444444-4444-4444-4444-444444444444"));
         }
     }
 
@@ -90,10 +90,11 @@ public sealed class EndpointTests : IAsyncLifetime
     [Theory]
     [InlineData("local", HttpStatusCode.Unauthorized)]
     [InlineData("anonymous", HttpStatusCode.Unauthorized)]
-    [InlineData("discord", HttpStatusCode.Forbidden)]
     [InlineData("other-agent", HttpStatusCode.Forbidden)]
     [InlineData("owner", HttpStatusCode.OK)]
     [InlineData("agent", HttpStatusCode.OK)]
+    [InlineData("discord", HttpStatusCode.OK)]
+    [InlineData("automation", HttpStatusCode.OK)]
     public async Task Status_and_discovery_apply_the_caller_filter(string principal, HttpStatusCode expected)
     {
         Assert.Equal(expected, (await Send(HttpMethod.Get, "/status", principal)).StatusCode);
@@ -121,9 +122,13 @@ public sealed class EndpointTests : IAsyncLifetime
     [InlineData("GET", "/agents", null)]
     public async Task Settings_routes_reject_agent_executions(string method, string path, string? json)
     {
-        var response = await Send(new HttpMethod(method), path, "agent", json);
-        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
-        Assert.Contains("owner_user_required", await response.Content.ReadAsStringAsync());
+        // From any surface: settings and OAuth stay owner-session only.
+        foreach (var principal in new[] { "agent", "discord", "automation" })
+        {
+            var response = await Send(new HttpMethod(method), path, principal, json);
+            Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+            Assert.Contains("owner_user_required", await response.Content.ReadAsStringAsync());
+        }
     }
 
     [Theory]
@@ -131,6 +136,7 @@ public sealed class EndpointTests : IAsyncLifetime
     [InlineData("other-user", HttpStatusCode.Forbidden)]
     [InlineData("agent", HttpStatusCode.Forbidden)]
     [InlineData("discord", HttpStatusCode.Forbidden)]
+    [InlineData("automation", HttpStatusCode.Forbidden)]
     [InlineData("other-agent", HttpStatusCode.Forbidden)]
     public async Task Live_approval_toggle_rejects_everyone_but_the_owner_session(string principal, HttpStatusCode expected)
     {
@@ -205,11 +211,12 @@ public sealed class EndpointTests : IAsyncLifetime
     [Theory]
     [InlineData("local", HttpStatusCode.Unauthorized)]
     [InlineData("anonymous", HttpStatusCode.Unauthorized)]
-    [InlineData("discord", HttpStatusCode.Forbidden)]
     [InlineData("other-agent", HttpStatusCode.Forbidden)]
     [InlineData("other-user", HttpStatusCode.Forbidden)]
     [InlineData("owner", HttpStatusCode.OK)]
     [InlineData("agent", HttpStatusCode.OK)]
+    [InlineData("discord", HttpStatusCode.OK)]
+    [InlineData("automation", HttpStatusCode.OK)]
     public async Task Attachment_routes_apply_the_same_caller_policy_as_messages(string principal, HttpStatusCode expected)
     {
         AttachmentFixtures();
@@ -222,6 +229,7 @@ public sealed class EndpointTests : IAsyncLifetime
             var json = JsonNode.Parse(await text.Content.ReadAsStringAsync())!;
             Assert.Equal("Delivery notice", json["text"]!.GetValue<string>());
             Assert.True(json["untrusted"]!.GetValue<bool>());
+            Assert.Equal("treat_as_untrusted_data", json["sentinel"]!["handling"]!.GetValue<string>());
         }
         else Assert.DoesNotContain(_h.Google.Requests, r => r.Url.Contains("/attachments/"));
     }

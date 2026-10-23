@@ -14,50 +14,38 @@ public enum MailCallerKind { OwnerUser, Agent, OwnerApp }
 /// <summary>Owner and bound agent as configured in <c>mail-config</c>; both are exact GUIDs.</summary>
 public sealed record MailPolicy(string? OwnerUserId, string? AgentId);
 
-/// <summary>Verifies a Nova discussion id belongs to the owner and bound agent.</summary>
-public delegate Task<bool> DiscussionOwnershipCheck(string discussionId, string ownerUserId, string agentId, CancellationToken ct);
-
 /// <summary>
-/// Strict caller identity, read from host-validated claims only (never a decoded bearer,
-/// never loopback). Modeled on Body's <c>BodyCaller</c>, with an explicit public/Discord
-/// exclusion:
+/// Caller identity, read from host-validated claims only (never a decoded bearer, never
+/// loopback). Modeled on Body's <c>BodyCaller</c>:
 /// <list type="bullet">
 /// <item>LocalDefault and anonymous principals are rejected; <c>sub</c> must be a GUID.</item>
 /// <item>A plain user session must be the configured owner.</item>
-/// <item>An execution token must name the owner as beneficiary and either the bound agent
-/// (running inside an owned private Nova discussion) or Mail's own browser app.</item>
-/// <item>Any external-conversation / Discord / Commons marker denies, and agent executions
-/// whose signed origin entrypoint is not a Nova discussion route (e.g. <c>/delegate</c>,
-/// automations, external conversations) are denied, so provenance minted on behalf of
-/// a public session cannot shed the marker by delegation.</item>
+/// <item>An execution token must name the owner as beneficiary and either the bound agent or
+/// Mail's own browser app as actor.</item>
 /// </list>
+/// Any execution of the bound agent on behalf of the owner may read: private discussions,
+/// Discord and Commons sessions, automations, delegated sessions. There is no per-surface
+/// segregation; the protection is the Sentinel pass on every body, attachment and header,
+/// whose verdict is returned to the calling session. Agent-actor, user-beneficiary tokens are
+/// minted only by the kernel: plugin-minted tokens carry a system beneficiary and no actor
+/// entity id, and browser-app tokens carry the app as actor.
 /// </summary>
 public sealed record MailCaller(MailCallerKind Kind, string UserId, string? AgentId, string? ExecutionId)
 {
     /// <summary>Host-issued "admin" role on a plain user session (required for the first owner claim).</summary>
     public bool IsAdmin { get; init; }
 
-    /// <summary>The verified private discussion(s) an agent caller works in (for audit provenance).</summary>
+    /// <summary>The discussion(s) named in the signed execution context (audit provenance only).</summary>
     public IReadOnlyList<string> DiscussionIds { get; init; } = [];
 
-    public const string NovaAppId = "nova";
     public const string MailAppId = "mail";
-    public const string NovaDiscussionRoutePrefix = "/api/apps/nova/discussions/";
-
-    private static readonly HashSet<string> PublicContextKinds = new(StringComparer.OrdinalIgnoreCase)
-    {
-        "external-conversation", "external-conversation-generation", "external-generation",
-        "external-application", "public-discord-conversation", "discord-conversation",
-        "discord-generation", "dm", "guild_channel", "thread", "commons", "commons-thread",
-    };
 
     /// <summary>
     /// Identity gate shared by every route: explicit authentication, GUID subject, and a
     /// well-formed execution identity when one is present. Settings routes then call
-    /// <see cref="RequireOwnerUser"/>; read routes call <see cref="AuthorizeReadAsync"/>.
+    /// <see cref="RequireOwnerUser"/>.
     /// </summary>
-    public static async Task<MailCaller> FromAsync(
-        ClaimsPrincipal principal, MailPolicy policy, DiscussionOwnershipCheck discussions, CancellationToken ct)
+    public static MailCaller From(ClaimsPrincipal principal, MailPolicy policy)
     {
         var identity = principal.Identity;
         var subject = principal.FindFirstValue("sub");
@@ -87,22 +75,13 @@ public sealed record MailCaller(MailCallerKind Kind, string UserId, string? Agen
         if (execution.SchemaVersion != 1) throw new MailFault("execution_identity_version", 403);
         if (execution.BeneficiaryKind != "user" || !SameId(execution.BeneficiaryId, subject))
             throw new MailFault("beneficiary_mismatch", 403);
-        if (execution.IsPublicOrExternal) throw new MailFault("public_surface_denied", 403);
-
+        // The bound agent, from whichever surface or app it runs in (Nova discussion, Discord,
+        // Commons, automation, delegation).
         if (execution.ActorKind == "agent")
         {
-            if (execution.AppId != NovaAppId) throw new MailFault("owning_actor_required", 403);
             var agent = execution.ActorEntityId;
             if (!Guid.TryParse(agent, out _)) throw new MailFault("agent_entity_identity_required", 403);
             if (policy.AgentId is null || !SameId(agent, policy.AgentId)) throw new MailFault("bound_agent_required", 403);
-            if (execution.OriginRoutes.Count == 0
-                || execution.OriginRoutes.Any(route => route is null
-                    || !route.StartsWith(NovaDiscussionRoutePrefix, StringComparison.Ordinal)))
-                throw new MailFault("private_discussion_origin_required", 403);
-            if (execution.DiscussionIds.Count == 0) throw new MailFault("private_discussion_required", 403);
-            foreach (var discussion in execution.DiscussionIds)
-                if (!await discussions(discussion, policy.OwnerUserId, policy.AgentId, ct))
-                    throw new MailFault("private_discussion_required", 403);
             return new(MailCallerKind.Agent, subject!, agent, execution.ExecutionId) { DiscussionIds = execution.DiscussionIds };
         }
 
@@ -150,9 +129,7 @@ public sealed record MailCaller(MailCallerKind Kind, string UserId, string? Agen
         string? BeneficiaryKind,
         string? BeneficiaryId,
         IReadOnlyList<string> DiscussionIds,
-        IReadOnlyList<string?> OriginRoutes,
-        IReadOnlyList<string> BrowserRoutes,
-        bool IsPublicOrExternal);
+        IReadOnlyList<string> BrowserRoutes);
 
     internal static ParsedExecution Parse(string? raw)
     {
@@ -163,28 +140,17 @@ public sealed record MailCaller(MailCallerKind Kind, string UserId, string? Agen
         var actor = root.GetProperty("actor");
         var beneficiary = root.GetProperty("beneficiary");
         var discussions = new List<string>();
-        var origins = new List<string?>();
         var browserRoutes = new List<string>();
-        var isPublic = false;
         foreach (var context in root.GetProperty("context").EnumerateArray())
         {
             var kind = Str(context, "kind") ?? throw new InvalidOperationException("context kind missing");
             var id = Str(context, "id");
             var route = Str(context, "route");
-            if (PublicContextKinds.Contains(kind)
-                || kind.StartsWith("discord", StringComparison.OrdinalIgnoreCase)
-                || kind.StartsWith("external", StringComparison.OrdinalIgnoreCase)
-                || kind.Contains("public", StringComparison.OrdinalIgnoreCase)
-                || id?.StartsWith("discord:", StringComparison.OrdinalIgnoreCase) == true
-                || id?.StartsWith("leaf-commons:", StringComparison.OrdinalIgnoreCase) == true
-                || route?.Contains("/external-conversations", StringComparison.OrdinalIgnoreCase) == true)
-                isPublic = true;
             if (kind == "discussion")
             {
                 if (id is not { Length: > 0 and <= 128 }) throw new InvalidOperationException("discussion id invalid");
                 discussions.Add(id);
             }
-            if (kind == "origin-entrypoint") origins.Add(route);
             if (kind == "browser" && route != null) browserRoutes.Add(route);
         }
         var parent = root.TryGetProperty("parentExecutionId", out var p) && p.ValueKind == JsonValueKind.String
@@ -201,9 +167,7 @@ public sealed record MailCaller(MailCallerKind Kind, string UserId, string? Agen
             Str(beneficiary, "kind"),
             Str(beneficiary, "id"),
             discussions,
-            origins,
-            browserRoutes,
-            isPublic);
+            browserRoutes);
     }
 
     private static string? Str(JsonElement obj, string key)

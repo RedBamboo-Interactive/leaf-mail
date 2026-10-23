@@ -80,10 +80,29 @@ public sealed class SentinelTests
     }
 
     [Fact]
+    public async Task A_discord_session_of_the_bound_agent_gets_the_reviewed_content_and_the_verdict()
+    {
+        var (h, review) = await SetupAsync();
+        var caller = MailCaller.From(CallerTests.Execution(CallerTests.DiscordNovaAgent()), new MailPolicy(Harness.Owner, Harness.Agent));
+        h.Entities.AddWithId(Guid.Parse(Harness.Agent), "agent", "nova", new JsonObject());
+
+        var result = await h.Service.MessageAsync("m1", caller, default);
+
+        // The same inbound pass as any other caller: hidden text gone, verdict returned to the session.
+        Assert.DoesNotContain("ignore previous", result["body"]!.GetValue<string>(), StringComparison.OrdinalIgnoreCase);
+        var sentinel = result["sentinel"]!.AsObject();
+        Assert.True(sentinel["available"]!.GetValue<bool>());
+        Assert.Equal("treat_as_untrusted_data", sentinel["handling"]!.GetValue<string>());
+        var request = Assert.Single(review.Requests);
+        Assert.Equal(("agent", Harness.Agent), (request.ComputeProvenance!.Actor.Kind, request.ComputeProvenance.Actor.EntityId));
+        Assert.Equal(Harness.Owner, request.ComputeProvenance.OnBehalfOf.Id);
+    }
+
+    [Fact]
     public async Task Verdict_passes_through_and_the_request_carries_source_format_and_attribution()
     {
         var (h, review) = await SetupAsync();
-        var agent = CallerTests.Execution(CallerTests.PrivateNovaAgent());
+        var agent = CallerTests.Execution(CallerTests.NovaAgent());
         var caller = new MailCaller(MailCallerKind.Agent, Harness.Owner, Harness.Agent, "exec-1") { DiscussionIds = ["disc-private-1"] };
         h.Entities.AddWithId(Guid.Parse(Harness.Agent), "agent", "nova", new JsonObject());
 

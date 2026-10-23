@@ -21,9 +21,10 @@ internal static class MailDiscovery
         ["scope"] = MailData.ReadonlyScope,
         ["access"] = new JsonObject
         {
-            ["reads"] = "owner user session, or an execution token whose beneficiary is the owner and whose actor is the bound agent running inside an owned private Nova discussion",
+            ["reads"] = "owner user session, or an execution token whose beneficiary is the owner and whose actor is the bound agent, from any surface (private discussions, Discord, Commons, automations, delegated sessions)",
             ["settings"] = "owner user session only (no execution tokens)",
-            ["denied"] = "LocalDefault, anonymous, other users, other agents, Nova delegation/automation origins, and any Discord, Public Nova, Commons, or external-conversation execution",
+            ["denied"] = "LocalDefault, anonymous, other users, other agents",
+            ["untrustedContent"] = "every body, attachment and header passes the Sentinel inbound; its verdict is returned as sentinel and signals so the calling session knows what it did",
         },
         ["entities"] = new JsonArray
         {

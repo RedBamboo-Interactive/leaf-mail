@@ -273,23 +273,6 @@ public sealed class MailStore(IEntityStore entities, ILogger<MailStore>? logger 
     public async Task<MailAccountSnapshot> PatchAccountAsync(MailAccountSnapshot account, JsonObject patch, CancellationToken ct = default)
         => AccountFrom(await entities.PatchAsync(account.Entity.Id, patch, ct: ct));
 
-    /// <summary>True only for a Nova discussion entity owned by exactly this owner and agent.</summary>
-    public async Task<bool> IsOwnedNovaDiscussionAsync(string discussionId, string ownerUserId, string agentId, CancellationToken ct)
-    {
-        var rows = await entities.QueryAsync(new EntityQuery
-        {
-            TypeSlug = "discussion",
-            DataEquals = new Dictionary<string, object?> { ["discussion_id"] = discussionId },
-            Limit = 2,
-        }, ct);
-        if (rows.Count != 1) return false;
-        var data = rows[0].Data;
-        return MailData.String(data, "discussion_id") == discussionId
-            && MailData.String(data, "app") == "nova"
-            && SameGuid(MailData.String(data, "owner_id"), ownerUserId)
-            && SameGuid(MailData.String(data, "agent"), agentId);
-    }
-
     public async Task<bool> IsAgentAsync(string agentId, CancellationToken ct)
         => Guid.TryParse(agentId, out var id) && (await entities.GetAsync(id, ct))?.TypeSlug == "agent";
 

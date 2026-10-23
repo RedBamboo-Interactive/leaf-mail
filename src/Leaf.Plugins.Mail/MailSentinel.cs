@@ -179,7 +179,7 @@ public sealed class MailSentinel(IUntrustedContentReview? review, ILogger<MailSe
     /// <summary>
     /// Audit provenance for the review job, built from the host-verified caller: app Mail,
     /// actor the bound agent (or the owner's own session), beneficiary the owner, and the
-    /// caller's private discussion plus the mail item as context. Null if anything is missing;
+    /// discussion(s) named in the caller's execution context plus the mail item. Null if anything is missing;
     /// the gateway then derives identity from the ambient execution scope.
     /// </summary>
     public static async Task<ComputeProvenance?> ProvenanceAsync(

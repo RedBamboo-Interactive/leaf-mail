@@ -21,8 +21,8 @@ internal static class MailEndpoints
     public static void Map(RouteGroupBuilder group)
     {
         // Host authentication is required; this filter additionally rejects LocalDefault,
-        // other users, non-bound or public/Discord executions. Authorization never relies on
-        // identifiers from request payloads.
+        // other users, and executions of anyone but the bound agent (or Mail's own app) on the
+        // owner's behalf. Authorization never relies on identifiers from request payloads.
         group.AddEndpointFilter(async (ctx, next) =>
         {
             var http = ctx.HttpContext;
@@ -31,8 +31,7 @@ internal static class MailEndpoints
             {
                 var store = http.RequestServices.GetRequiredService<MailStore>();
                 var policy = await store.GetPolicyAsync(http.RequestAborted);
-                http.Items[CallerKey] = await MailCaller.FromAsync(http.User, policy,
-                    store.IsOwnedNovaDiscussionAsync, http.RequestAborted);
+                http.Items[CallerKey] = MailCaller.From(http.User, policy);
                 return await next(ctx);
             }
             catch (MailFault fault) { return Error(fault.Code, fault.Code, fault.Status); }

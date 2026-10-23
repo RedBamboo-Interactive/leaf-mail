@@ -143,8 +143,7 @@ public sealed class SecurityFixTests
         if (tamper == "owner")
         {
             var policy = await h.Store.GetPolicyAsync();
-            Assert.Equal("owner_required", (await Assert.ThrowsAsync<MailFault>(() => MailCaller.FromAsync(
-                CallerTests.User(other), policy, (_, _, _, _) => Task.FromResult(true), default))).Code);
+            Assert.Equal("owner_required", Assert.Throws<MailFault>(() => MailCaller.From(CallerTests.User(other), policy)).Code);
         }
     }
 
@@ -216,9 +215,9 @@ public sealed class SecurityFixTests
             new System.Security.Claims.Claim("sub", Harness.Owner),
             new System.Security.Claims.Claim("roles", "[\"admin\"]", "JSON_ARRAY"),
         ], "Bearer"));
-        var caller = await MailCaller.FromAsync(principal, new MailPolicy(null, null), (_, _, _, _) => Task.FromResult(false), default);
+        var caller = MailCaller.From(principal, new MailPolicy(null, null));
         Assert.True(caller.IsAdmin);
-        Assert.False((await MailCaller.FromAsync(CallerTests.User(), new MailPolicy(null, null), (_, _, _, _) => Task.FromResult(false), default)).IsAdmin);
+        Assert.False(MailCaller.From(CallerTests.User(), new MailPolicy(null, null)).IsAdmin);
     }
 
     // ── 3: ReDoS ────────────────────────────────────────────────────────────
