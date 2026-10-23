@@ -13,6 +13,7 @@
     <Nullable>enable</Nullable>
     <RootNamespace>Leaf.Plugins.Mail</RootNamespace>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
     <!-- Framework-dependent: runs on the .NET the kernel runs on (or a newer major). -->
     <RollForward>Major</RollForward>
     <!-- Small, predictable footprint inside the job's memory limit. -->

@@ -6,6 +6,7 @@
     <Nullable>enable</Nullable>
     <RootNamespace>Leaf.Plugins.Mail</RootNamespace>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
     <!-- RedLeaf loads workspace plugins through a private AssemblyLoadContext from the
          checkout's build output. Library projects do not otherwise copy NuGet runtime
          dependencies beside their assembly, so PdfPig and MimeKitLite would be missing
