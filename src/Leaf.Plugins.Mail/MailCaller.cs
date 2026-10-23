@@ -7,6 +7,8 @@ public sealed class MailFault(string code, int status) : Exception(code)
 {
     public string Code { get; } = code;
     public int Status { get; } = status;
+    /// <summary>Human-readable explanation returned as the error message (never secret).</summary>
+    public string? Detail { get; init; }
 }
 
 public enum MailCallerKind { OwnerUser, Agent, OwnerApp }

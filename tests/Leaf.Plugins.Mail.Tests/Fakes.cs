@@ -12,11 +12,16 @@ internal sealed class MemoryEntities : IEntityStore
 {
     private readonly ConcurrentDictionary<Guid, LeafEntity> _items = new();
 
+    /// <summary>When set, reads by id or by type and slug fail as a broken store would.</summary>
+    public bool FailRead;
+
     public Task<LeafEntity?> GetAsync(Guid id, CancellationToken ct = default)
-        => Task.FromResult(_items.TryGetValue(id, out var e) ? Clone(e) : null);
+        => FailRead ? throw new InvalidOperationException("store down")
+            : Task.FromResult(_items.TryGetValue(id, out var e) ? Clone(e) : null);
 
     public Task<LeafEntity?> GetBySlugAsync(string typeSlug, string slug, CancellationToken ct = default)
-        => Task.FromResult(_items.Values.FirstOrDefault(e => e.TypeSlug == typeSlug && e.Slug == slug) is { } e ? Clone(e) : null);
+        => FailRead ? throw new InvalidOperationException("store down")
+            : Task.FromResult(_items.Values.FirstOrDefault(e => e.TypeSlug == typeSlug && e.Slug == slug) is { } e ? Clone(e) : null);
 
     public Task<LeafEntity?> GetBySlugAsync(string slug, CancellationToken ct = default)
         => Task.FromResult(_items.Values.FirstOrDefault(e => e.Slug == slug) is { } e ? Clone(e) : null);
@@ -217,20 +222,39 @@ internal sealed class Harness
     public readonly GmailClient Gmail_;
     public readonly MailLiveOutbox Outbox;
     public readonly MailService Service;
+    public readonly MailSentinel Sentinel;
+
+    /// <summary>Flips cap-sentinel's plugin entity status, as the kernel does on enable/disable.</summary>
+    public Task SetSentinelStatusAsync(string status)
+        => Entities.PatchAsync(SentinelPluginEntity!.Id, new JsonObject { ["status"] = PluginStatuses[status].ToString() });
     public readonly List<PluginLiveEventProjection> Live = [];
 
     public readonly LeafEntity MailPluginEntity;
+    public readonly LeafEntity? SentinelPluginEntity;
+    public readonly Dictionary<string, Guid> PluginStatuses = new();
 
-    public Harness(Leaf.Sdk.Services.IUntrustedContentReview? review = null)
+    /// <param name="review">The Sentinel; by default a pass-through fake, so tests about other things see an available Sentinel.</param>
+    /// <param name="sentinelInstalled">False: no review service and no cap-sentinel plugin entity at all.</param>
+    public Harness(Leaf.Sdk.Services.IUntrustedContentReview? review = null, bool sentinelInstalled = true)
     {
         MailPluginEntity = Entities.Add("plugin", "mail", new JsonObject());
+        foreach (var status in new[] { "enabled", "disabled", "tripped", "mismatch" })
+            PluginStatuses[status] = Entities.Add("plugin-status", status, new JsonObject()).Id;
+        if (sentinelInstalled)
+        {
+            review ??= new FakeReview { DelayMs = 0 };
+            SentinelPluginEntity = Entities.Add("plugin", MailSentinel.SentinelPluginId,
+                new JsonObject { ["status"] = PluginStatuses["enabled"].ToString() });
+        }
+        else review = null;
         var http = new HttpClient(Google);
         Store = new MailStore(Entities);
         OAuth = new GoogleOAuthClient(http, Endpoints);
         Tokens = new MailTokenCache(OAuth, Store);
         Gmail_ = new GmailClient(http, Endpoints, Tokens, new MailBackoff((_, _) => Task.CompletedTask));
         Outbox = new MailLiveOutbox(Events, async ct => (await Store.GetPolicyAsync(ct), await Store.GetLiveApprovalAsync(ct)));
-        Service = new MailService(Store, Tokens, Gmail_, OAuth, Records, Outbox, sentinel: new MailSentinel(review));
+        Sentinel = new MailSentinel(review, entities: Entities) { AvailabilityCache = TimeSpan.Zero };
+        Service = new MailService(Store, Tokens, Gmail_, OAuth, Records, Outbox, sentinel: Sentinel);
         // Behave like the kernel registry: the projector resolves each nonce event.
         Events.OnPublish = async evt =>
         {

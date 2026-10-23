@@ -34,7 +34,7 @@ internal static class MailEndpoints
                 http.Items[CallerKey] = MailCaller.From(http.User, policy);
                 return await next(ctx);
             }
-            catch (MailFault fault) { return Error(fault.Code, fault.Code, fault.Status); }
+            catch (MailFault fault) { return Error(fault.Code, fault.Detail ?? fault.Code, fault.Status); }
             catch (MailReauthRequiredException ex)
             {
                 await http.RequestServices.GetRequiredService<MailService>()

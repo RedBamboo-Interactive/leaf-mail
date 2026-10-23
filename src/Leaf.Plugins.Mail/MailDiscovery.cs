@@ -59,10 +59,11 @@ internal static class MailDiscovery
         },
         ["sentinel"] = new JsonObject
         {
-            ["capability"] = "sentinel (cap-sentinel), optional",
-            ["reviews"] = "every message body and attachment text, once per item per request",
+            ["capability"] = "sentinel (cap-sentinel); required for any content, fail closed",
+            ["reviews"] = "every message body and attachment text, once per item per request; header fields and filenames through the deterministic Screen() pass",
             ["returns"] = "VisibleContent (hidden text removed); links[] from visible content; hiddenLinks[] flagged; sentinel { available, risk, signals, handling, isolation, screening }",
-            ["unavailable"] = "sentinel.available=false with reason not_installed, timeout, error, or no_content; content still returned",
+            ["down"] = "cap-sentinel missing, disabled, tripped or of unknown status: content routes return 503 sentinel_unavailable with no mail content, new-mail LIVE notices are skipped, /status reports sentinel { available: false, reason }",
+            ["itemUnavailable"] = "a review that fails, times out, runs out of budget or reports itself unavailable withholds that item: body/text null, sentinel { available: false, withheld: true, reason }; metadata only if Screen() ran on it",
         },
         ["skill_assignment"] = "binding an agent adds Mail's mail skill to it; unbinding or switching removes it from the previous agent",
         ["live"] = new JsonObject

@@ -10,7 +10,9 @@ namespace Leaf.Plugins.Mail;
 /// <summary>Who asked, for the review's audit provenance and the reviewer's Agent context.</summary>
 public sealed record MailReviewContext(string OwnerUserId, string? AgentId, ComputeProvenance? Provenance);
 
-public sealed record ReviewedContent(SanitizedBody Body, IReadOnlyList<MailLink> HiddenLinks, JsonObject Sentinel)
+/// <param name="Withheld">True when the model review did not complete for this item: no text,
+/// links, or hidden links are returned, only the <paramref name="Sentinel"/> object saying why.</param>
+public sealed record ReviewedContent(SanitizedBody Body, IReadOnlyList<MailLink> HiddenLinks, JsonObject Sentinel, bool Withheld = false)
 {
     public JsonArray LinksJson() => new(Body.Links.Select(l => (JsonNode)new JsonObject
     {
@@ -23,20 +25,91 @@ public sealed record ReviewedContent(SanitizedBody Body, IReadOnlyList<MailLink>
     }).ToArray());
 }
 
+/// <summary>Whether the Sentinel can be used right now, and if not, why.</summary>
+public sealed record SentinelAvailability(bool Available, string? Reason)
+{
+    public JsonObject ToJson()
+    {
+        var json = new JsonObject { ["available"] = Available };
+        if (Reason != null) json["reason"] = Reason;
+        return json;
+    }
+}
+
 /// <summary>
 /// Routes everything Mail returns as content through the shared Sentinel
-/// (<see cref="IUntrustedContentReview"/>), as a soft dependency: without cap-sentinel the
-/// content is sanitized exactly as before and <c>sentinel.available</c> is false. With it, the
-/// returned text is the Sentinel's <c>VisibleContent</c> (hidden HTML and invisible characters
-/// removed), <c>links[]</c> come from the visible content only, and links that appeared only in
-/// hidden regions are listed separately and flagged. A review that times out or fails degrades
-/// to the model-free screening pass, then to plain sanitizing; it never fails the request.
-/// Compute is never chosen here: the Sentinel's configuration and the bound Agent decide.
+/// (<see cref="IUntrustedContentReview"/>), and fails closed: if the Sentinel is down, no mail
+/// content leaves Mail.
+/// <list type="bullet">
+/// <item>cap-sentinel missing, disabled, tripped, or of unknown status: every content route
+/// refuses with 503 <c>sentinel_unavailable</c>, and new-mail LIVE notices are skipped.</item>
+/// <item>The model review of one item fails, times out, runs out of budget, or reports itself
+/// unavailable: that item's text is withheld (<c>body: null</c>) and <c>sentinel</c> says why.</item>
+/// <item>Header fields and filenames are returned only when the deterministic <c>Screen()</c>
+/// pass actually ran on them.</item>
+/// </list>
+/// Returned text is the Sentinel's <c>VisibleContent</c> (hidden HTML and invisible characters
+/// removed); <c>links[]</c> come from the visible content only, and links that appeared only in
+/// hidden regions are listed separately and flagged. Compute is never chosen here: the
+/// Sentinel's configuration and the bound Agent decide.
 /// </summary>
-public sealed class MailSentinel(IUntrustedContentReview? review, ILogger<MailSentinel>? logger = null)
+public sealed class MailSentinel(IUntrustedContentReview? review, ILogger<MailSentinel>? logger = null, IEntityStore? entities = null)
 {
     public const string CallerApp = MailPlugin.PluginId;
+    public const string SentinelPluginId = "cap-sentinel";
     public bool Installed => review != null;
+
+    /// <summary>How long an availability answer is reused (the plugin status is an entity read).</summary>
+    internal TimeSpan AvailabilityCache { get; init; } = TimeSpan.FromSeconds(5);
+    private (SentinelAvailability Value, long At)? _availability;
+
+    /// <summary>
+    /// The review service must be registered, and cap-sentinel's plugin entity must have status
+    /// <c>enabled</c>: the kernel still registers a disabled plugin's services, and enabling or
+    /// disabling happens at runtime on that entity. Any doubt (unreadable status) is unavailable.
+    /// </summary>
+    public async Task<SentinelAvailability> AvailabilityAsync(CancellationToken ct)
+    {
+        if (review == null) return new(false, "not_installed");
+        if (entities == null) return new(true, null);
+        if (_availability is { } cached && System.Diagnostics.Stopwatch.GetElapsedTime(cached.At) < AvailabilityCache)
+            return cached.Value;
+        SentinelAvailability value;
+        try
+        {
+            var plugin = await entities.GetBySlugAsync("plugin", SentinelPluginId, ct);
+            if (plugin == null) value = new(false, "not_installed");
+            else
+            {
+                var statusRef = MailData.String(plugin.Data, "status");
+                var status = Guid.TryParse(statusRef, out var statusId) ? await entities.GetAsync(statusId, ct) : null;
+                value = status?.Slug switch
+                {
+                    "enabled" => new(true, null),
+                    null => new(false, "status_unknown"),
+                    var other => new(false, other), // disabled, tripped, mismatch
+                };
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger?.LogWarning("Sentinel status could not be read ({Type})", ex.GetType().Name);
+            value = new(false, "status_unknown");
+        }
+        _availability = (value, System.Diagnostics.Stopwatch.GetTimestamp());
+        return value;
+    }
+
+    /// <summary>Throws 503 <c>sentinel_unavailable</c> unless the Sentinel can review content now.</summary>
+    public async Task RequireAvailableAsync(CancellationToken ct)
+    {
+        var availability = await AvailabilityAsync(ct);
+        if (!availability.Available)
+            throw new MailFault("sentinel_unavailable", 503)
+            {
+                Detail = $"The Sentinel safety check is unavailable ({availability.Reason}); Mail returns no mail content until it is back",
+            };
+    }
 
     public async Task<ReviewedContent> ReviewAsync(
         string content, bool html, string source, string sourceRef, MailReviewContext context, CancellationToken ct)
@@ -77,49 +150,58 @@ public sealed class MailSentinel(IUntrustedContentReview? review, ILogger<MailSe
             }
         }
 
+        if (reason == null && verdict is { Available: false }) reason = "model_unavailable";
+
         // Trust VisibleContent whenever screening ran, including when everything was hidden
-        // (empty). Only an item that was never screened (the Sentinel's Unscreened result:
-        // empty visible content, no hidden-content signals, or content-too-large) is screened
-        // locally instead, and only if that is impossible is the raw input shown.
-        if (review != null && (screening == null || !Screened(screening, input)))
+        // (empty). An item the review did not screen (the Sentinel's Unscreened result: empty
+        // visible content, no hidden-content signals, or content-too-large) is screened locally.
+        if (reason == null && (screening == null || !Screened(screening, input)))
         {
-            try { screening = review.Screen(input, format); }
+            try { screening = review!.Screen(input, format); }
             catch (Exception ex) when (ex is not OutOfMemoryException) { screening = null; }
+            if (screening == null || !Screened(screening, input)) reason = "screening_unavailable";
         }
-        var visible = screening != null && Screened(screening, input) ? screening.VisibleContent : null;
-        var shown = visible ?? input;
-        var body = html ? MailMessageParser.SanitizeHtml(shown) : MailMessageParser.SanitizeText(shown);
+
+        var sentinel = new JsonObject
+        {
+            ["available"] = reason == null && (verdict?.Available ?? false),
+            ["risk"] = verdict?.Risk ?? "unknown",
+            ["signals"] = new JsonArray((verdict?.Signals ?? []).Select(x => (JsonNode)JsonValue.Create(x)).ToArray()),
+            ["handling"] = verdict?.Handling ?? "treat_as_untrusted_data",
+            ["isolation"] = verdict?.Isolation ?? UntrustedContentIsolation.Unknown,
+        };
+        if (jobId != null) sentinel["jobId"] = jobId;
+
+        // Never return text the model review did not pass: withhold it and say why.
+        if (reason != null)
+        {
+            sentinel["reason"] = reason;
+            sentinel["withheld"] = true;
+            return new ReviewedContent(new SanitizedBody("", false, html ? "text/html" : "text/plain", []), [], sentinel, Withheld: true);
+        }
+
+        var visible = screening!.VisibleContent;
+        var body = html ? MailMessageParser.SanitizeHtml(visible) : MailMessageParser.SanitizeText(visible);
         if (cut) body = body with { Truncated = true };
 
         IReadOnlyList<MailLink> hidden = [];
-        if (visible != null && screening!.HasHiddenContent)
+        if (screening.HasHiddenContent)
         {
             var all = html ? MailMessageParser.SanitizeHtml(input) : MailMessageParser.SanitizeText(input);
             var visibleHrefs = body.Links.Select(l => l.Href).ToHashSet(StringComparer.Ordinal);
             hidden = all.Links.Where(l => !visibleHrefs.Contains(l.Href)).Take(MailMessageParser.LinkCap).ToArray();
         }
 
-        var sentinel = new JsonObject
+        sentinel["screening"] = new JsonObject
         {
-            ["available"] = verdict?.Available ?? false,
-            ["risk"] = verdict?.Risk ?? "unknown",
-            ["signals"] = new JsonArray((verdict?.Signals ?? []).Select(x => (JsonNode)JsonValue.Create(x)).ToArray()),
-            ["handling"] = verdict?.Handling ?? "treat_as_untrusted_data",
-            ["isolation"] = verdict?.Isolation ?? UntrustedContentIsolation.Unknown,
+            ["injectionScore"] = screening.InjectionScore,
+            ["suspicious"] = screening.Suspicious,
+            ["injectionSignals"] = new JsonArray(screening.InjectionSignals.Select(x => (JsonNode)JsonValue.Create(x)).ToArray()),
+            ["hiddenContent"] = screening.HasHiddenContent,
+            ["hiddenContentSignals"] = new JsonArray(screening.HiddenContentSignals.Select(x => (JsonNode)JsonValue.Create(x)).ToArray()),
+            // Counts only: hidden text is exactly what must not reach the reader.
+            ["hiddenSegments"] = screening.HiddenSegments.Count,
         };
-        if (reason != null) sentinel["reason"] = reason;
-        if (jobId != null) sentinel["jobId"] = jobId;
-        if (screening != null)
-            sentinel["screening"] = new JsonObject
-            {
-                ["injectionScore"] = screening.InjectionScore,
-                ["suspicious"] = screening.Suspicious,
-                ["injectionSignals"] = new JsonArray(screening.InjectionSignals.Select(x => (JsonNode)JsonValue.Create(x)).ToArray()),
-                ["hiddenContent"] = screening.HasHiddenContent,
-                ["hiddenContentSignals"] = new JsonArray(screening.HiddenContentSignals.Select(x => (JsonNode)JsonValue.Create(x)).ToArray()),
-                // Counts only: hidden text is exactly what must not reach the reader.
-                ["hiddenSegments"] = screening.HiddenSegments.Count,
-            };
         return new ReviewedContent(body, hidden, sentinel);
     }
 
@@ -129,38 +211,42 @@ public sealed class MailSentinel(IUntrustedContentReview? review, ILogger<MailSe
     /// Screens the untrusted header fields (from, subject and, when returned, snippet) with the
     /// model-free pre-pass. The values themselves are already cleaned of invisible characters by
     /// the parser; this flags what was there: <c>invisible-characters</c>, the Sentinel's hidden
-    /// content signals, and injection pattern signals. Null when nothing was found.
+    /// content signals, and injection pattern signals (null when nothing was found).
+    /// <c>Screened</c> is false when the pass could not run on every field: the metadata must
+    /// then be withheld.
     /// </summary>
-    public JsonObject? ScreenFields(MailMetadata metadata, bool includeSnippet)
+    public (bool Screened, JsonObject? Signals) ScreenFields(MailMetadata metadata, bool includeSnippet)
     {
         var result = new JsonObject();
+        var screened = true;
         void One(string name, string? raw)
         {
             var signals = ScreenField(raw);
+            if (signals == null) { screened = false; return; }
             if (signals.Count > 0) result[name] = new JsonArray(signals.Select(x => (JsonNode)JsonValue.Create(x)).ToArray());
         }
         One("from", metadata.Raw.From);
+        One("to", string.Join(", ", metadata.To.Select(t => t.Name).Where(n => !string.IsNullOrEmpty(n))));
         One("subject", metadata.Raw.Subject);
         if (includeSnippet) One("snippet", metadata.Raw.Snippet);
-        return result.Count > 0 ? result : null;
+        return (screened, result.Count > 0 ? result : null);
     }
 
-    public IReadOnlyList<string> ScreenField(string? raw)
+    /// <summary>Signals for one untrusted field, or null when the Screen() pass could not run on it.</summary>
+    public IReadOnlyList<string>? ScreenField(string? raw)
     {
         if (string.IsNullOrEmpty(raw)) return [];
+        if (review == null) return null;
         if (raw.Length > MaxScreenedFieldLength) raw = raw[..MaxScreenedFieldLength];
         var signals = new List<string>();
         if (MailMessageParser.HasInvisible(raw)) signals.Add("invisible-characters");
-        if (review != null)
+        try
         {
-            try
-            {
-                var screening = review.Screen(raw, UntrustedContentFormat.Text);
-                foreach (var signal in screening.HiddenContentSignals.Concat(screening.InjectionSignals))
-                    if (!signals.Contains(signal)) signals.Add(signal);
-            }
-            catch (Exception ex) when (ex is not OutOfMemoryException) { signals.Add("screening-unavailable"); }
+            var screening = review.Screen(raw, UntrustedContentFormat.Text);
+            foreach (var signal in screening.HiddenContentSignals.Concat(screening.InjectionSignals))
+                if (!signals.Contains(signal)) signals.Add(signal);
         }
+        catch (Exception ex) when (ex is not OutOfMemoryException) { return null; }
         return signals;
     }
 

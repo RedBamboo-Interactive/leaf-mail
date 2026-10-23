@@ -280,6 +280,27 @@ public sealed class EndpointTests : IAsyncLifetime
         Assert.Contains("Desktop app", await response.Content.ReadAsStringAsync());
     }
 
+    [Theory]
+    [InlineData("/search?q=subject:receipt")]
+    [InlineData("/messages/m1")]
+    [InlineData("/threads/t1")]
+    [InlineData("/messages/m7/attachments")]
+    [InlineData("/messages/m7/attachments/1/text")]
+    public async Task Content_routes_return_503_while_the_sentinel_is_disabled_and_status_says_why(string path)
+    {
+        await _h.SetSentinelStatusAsync("disabled");
+        var response = await Send(HttpMethod.Get, path, "agent");
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+        var body = JsonNode.Parse(await response.Content.ReadAsStringAsync())!;
+        Assert.Equal("sentinel_unavailable", body["error"]!["code"]!.GetValue<string>());
+        Assert.Contains("Sentinel safety check is unavailable (disabled)", body["error"]!["message"]!.GetValue<string>());
+        Assert.Equal(["error"], body.AsObject().Select(p => p.Key).ToArray()); // no mail content at all
+
+        var status = JsonNode.Parse(await (await Send(HttpMethod.Get, "/status", "agent")).Content.ReadAsStringAsync())!;
+        Assert.False(status["sentinel"]!["available"]!.GetValue<bool>());
+        Assert.Equal("disabled", status["sentinel"]!["reason"]!.GetValue<string>());
+    }
+
     [Fact]
     public async Task Invalid_grant_during_a_read_marks_needs_reauth_and_returns_409()
     {

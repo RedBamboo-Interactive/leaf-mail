@@ -56,10 +56,11 @@ public sealed class MailPlugin : ILeafPlugin
             sp.GetService<ILogger<MailService>>(),
             sentinel: sp.GetRequiredService<MailSentinel>(),
             extractor: ExtractorSandbox.Resolve(ctx.PluginDirectory)));
-        // Soft dependency on the shared Sentinel (cap-sentinel): optional resolution, never a
-        // hard "requires". Without it Mail sanitizes as before and reports sentinel.available=false.
+        // The shared Sentinel (cap-sentinel) is resolved optionally, so Mail still loads without
+        // it, but Mail fails closed: while it is missing or not enabled, no mail content is returned.
         services.AddSingleton(sp => new MailSentinel(
-            sp.GetService<IUntrustedContentReview>(), sp.GetService<ILogger<MailSentinel>>()));
+            sp.GetService<IUntrustedContentReview>(), sp.GetService<ILogger<MailSentinel>>(),
+            sp.GetRequiredKeyedService<IEntityStore>(PluginId)));
         services.AddSingleton(sp => new MailConsent(
             sp.GetRequiredService<MailStore>(),
             sp.GetRequiredService<GoogleOAuthClient>(),

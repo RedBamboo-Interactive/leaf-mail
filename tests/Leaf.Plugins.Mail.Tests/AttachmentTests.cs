@@ -263,8 +263,7 @@ public sealed class AttachmentServiceTests
         Assert.Equal("Parcel 12345: [link 1]", result["text"]!.GetValue<string>());
         Assert.Equal("https://example.com/track", result["links"]![0]!["href"]!.GetValue<string>());
         Assert.True(result["untrusted"]!.GetValue<bool>());
-        Assert.False(result["sentinel"]!["available"]!.GetValue<bool>());
-        Assert.Equal("not_installed", result["sentinel"]!["reason"]!.GetValue<string>());
+        Assert.True(result["sentinel"]!["available"]!.GetValue<bool>());
         // No persistence: no records, no entity changes.
         Assert.Empty(h.Records.Once);
         Assert.Equal(entitiesBefore, (await h.Entities.QueryAsync(new Leaf.Sdk.EntityQuery { TypeSlug = MailData.AccountType })).Single().Data.ToJsonString());
