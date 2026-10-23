@@ -98,7 +98,7 @@ internal static class MailDiscovery
         Add(paths, "/messages/{id}", "get", "Live message read: metadata, Sentinel-visible plain-text body (links removed, capped 20000 chars), links[], hiddenLinks[], sentinel, untrusted");
         Add(paths, "/threads/{id}", "get", "Live thread read: the same per message (25 most recent), Sentinel-reviewed with bounded concurrency");
         Add(paths, "/messages/{id}/attachments", "get", "List attachments: partId (stable key), attachmentId (changes between fetches), filename, mimeType, size, inline");
-        Add(paths, "/messages/{id}/attachments/{partId}/text", "get", "Live attachment text (PDF, text/plain, text/csv, text/html, text/calendar, message/rfc822): status, text (capped 20000), links[], hiddenLinks[], sentinel; never stored");
+        Add(paths, "/messages/{id}/attachments/{partId}/text", "get", "Live attachment text (PDF, text/plain, text/csv, text/html, text/calendar, message/rfc822): status, detail, signals[] (PDF text a reader may not see), text (capped 20000), links[], hiddenLinks[], sentinel; never stored");
         Add(paths, "/agents", "get", "Owner only: agents the owner may bind Mail to");
         Add(paths, "/config", "put", "Owner session only: { agent_id, live_approved, live_excluded_categories }");
         Add(paths, "/client", "put", "Owner only: upload a Google Desktop app (\"installed\") client JSON");

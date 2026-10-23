@@ -561,6 +561,8 @@ public sealed class MailService(
         result["kind"] = extracted.Kind;
         if (extracted.Pages is { } pages) result["pages"] = pages;
         if (extracted.Detail is { } detail) result["detail"] = detail;
+        if (extracted.Signals is { Count: > 0 } signals)
+            result["signals"] = new JsonArray(signals.Select(s => (JsonNode?)JsonValue.Create(s)).ToArray());
         if (extracted.Status != AttachmentStatus.Ok)
         {
             foreach (var (key, value) in ContentJson(new ReviewedContent(new SanitizedBody("", false, extracted.Kind, []), [], NoContentSentinel())))

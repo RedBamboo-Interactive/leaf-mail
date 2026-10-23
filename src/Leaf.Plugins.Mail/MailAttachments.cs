@@ -6,7 +6,6 @@ using UglyToad.PdfPig;
 using UglyToad.PdfPig.Content;
 using UglyToad.PdfPig.Core;
 using UglyToad.PdfPig.DocumentLayoutAnalysis.TextExtractor;
-using UglyToad.PdfPig.DocumentLayoutAnalysis.WordExtractor;
 using UglyToad.PdfPig.Exceptions;
 
 namespace Leaf.Plugins.Mail;
@@ -41,11 +40,26 @@ public static class AttachmentStatus
 }
 
 /// <param name="Content">Plain text, or HTML when <see cref="IsHtml"/> (sanitized afterwards).</param>
+/// <param name="Signals">Suspicious traits of the document that were kept in the text, as stable slugs.</param>
 public sealed record ExtractedAttachment(string Status, string Content, bool IsHtml, bool Truncated, string Kind, string? Detail = null,
-    int? Pages = null, PdfStats? Stats = null);
+    int? Pages = null, PdfStats? Stats = null, IReadOnlyList<string>? Signals = null);
 
 /// <summary>What a PDF extraction cost (diagnostics and tests; never returned over HTTP).</summary>
-public sealed record PdfStats(long DecodedBytes, long AllocatedBytes, TimeSpan Elapsed, int HiddenGlyphs);
+public sealed record PdfStats(long DecodedBytes, long AllocatedBytes, TimeSpan Elapsed, PdfGlyphCounts Glyphs);
+
+/// <summary>
+/// Glyphs a reader may not see. Only <see cref="Removed"/> ones are dropped from the text: invisible
+/// (render mode 3/7) text with no image beneath it. The rest stay in the text and are flagged: an OCR
+/// layer over a scanned image is how searchable scans work, and white or tiny text is common in
+/// real statements (white headers on coloured bars), so deleting it damages ordinary documents.
+/// </summary>
+public sealed record PdfGlyphCounts(int Removed = 0, int OcrLayer = 0, int White = 0, int Tiny = 0, int OffPage = 0)
+{
+    public PdfGlyphCounts Add(PdfGlyphCounts other) => new(Removed + other.Removed, OcrLayer + other.OcrLayer,
+        White + other.White, Tiny + other.Tiny, OffPage + other.OffPage);
+}
+
+internal enum GlyphClass { Visible, Removed, OcrLayer, White, Tiny, OffPage }
 
 /// <summary>
 /// Read-only attachment text extraction, entirely in memory. Nothing is executed, rendered, or
@@ -219,8 +233,8 @@ public static class AttachmentExtractor
         var builder = new StringBuilder();
         var truncated = false;
         int? pages = null;
-        var hiddenGlyphs = 0;
-        PdfStats Stats() => new(budget.DecodedBytes, budget.AllocatedBytes, budget.Elapsed, hiddenGlyphs);
+        var glyphs = new PdfGlyphCounts();
+        PdfStats Stats() => new(budget.DecodedBytes, budget.AllocatedBytes, budget.Elapsed, glyphs);
         try
         {
             using var document = PdfDocument.Open(bytes, new ParsingOptions
@@ -236,8 +250,8 @@ public static class AttachmentExtractor
             {
                 budget.Check();
                 var page = document.GetPage(number);
-                var (pageText, hidden) = PageText(page);
-                hiddenGlyphs += hidden;
+                var (pageText, counts) = PageText(page);
+                glyphs = glyphs.Add(counts);
                 if (builder.Length > 0 && pageText.Length > 0) builder.Append("\n\n");
                 builder.Append(pageText);
                 if (builder.Length > RawTextCap) { truncated = true; break; }
@@ -276,55 +290,175 @@ public static class AttachmentExtractor
             if (text.Length > RawTextCap) text = text[..RawTextCap];
             var notes = new List<string>();
             if (stopped != null) notes.Add(stopped);
-            if (hiddenGlyphs > 0)
-                notes.Add($"{hiddenGlyphs} hidden character(s) removed (invisible, white, tiny or off-page text)");
+            var (glyphNotes, signals) = GlyphReport(glyphs);
+            notes.AddRange(glyphNotes);
             var detail = notes.Count > 0 ? string.Join("; ", notes) : null;
             return string.IsNullOrWhiteSpace(text)
                 ? new ExtractedAttachment(AttachmentStatus.NoText, "", false, false, kind,
-                    detail ?? "The PDF has no extractable text (it may be scanned images; OCR is not available)", pages, Stats())
-                : new ExtractedAttachment(AttachmentStatus.Ok, text, false, truncated, kind, detail, pages, Stats());
+                    detail ?? "The PDF has no extractable text (it may be scanned images; OCR is not available)", pages, Stats(), signals)
+                : new ExtractedAttachment(AttachmentStatus.Ok, text, false, truncated, kind, detail, pages, Stats(), signals);
         }
     }
 
-    /// <summary>
-    /// A glyph a reader cannot see: render mode Neither (3) or NeitherClip (7), white fill in a
-    /// fill mode, a font smaller than 1pt, or a glyph entirely outside the crop box.
-    /// </summary>
-    internal static bool IsHiddenGlyph(Letter letter, PdfRectangle visibleArea)
+    public const string SignalInvisibleTextRemoved = "pdf_invisible_text_removed";
+    public const string SignalWhiteText = "pdf_white_text";
+    public const string SignalTinyText = "pdf_tiny_text";
+    public const string SignalOffPageText = "pdf_off_page_text";
+
+    private static (List<string> Notes, IReadOnlyList<string>? Signals) GlyphReport(PdfGlyphCounts glyphs)
     {
-        if (letter.RenderingMode is TextRenderingMode.Neither or TextRenderingMode.NeitherClip) return true;
-        if (letter.PointSize is > 0 and < 1) return true;
+        var notes = new List<string>();
+        var signals = new List<string>();
+        if (glyphs.Removed > 0)
+        {
+            notes.Add($"{glyphs.Removed} invisible character(s) removed (render mode 3 text with no image beneath)");
+            signals.Add(SignalInvisibleTextRemoved);
+        }
+        var flagged = new List<string>();
+        void Flag(int count, string what, string signal)
+        {
+            if (count == 0) return;
+            flagged.Add($"{count} {what}");
+            signals.Add(signal);
+        }
+        Flag(glyphs.White, "white or near-white", SignalWhiteText);
+        Flag(glyphs.Tiny, "below 1pt", SignalTinyText);
+        Flag(glyphs.OffPage, "outside the page", SignalOffPageText);
+        if (flagged.Count > 0)
+            notes.Add($"Possibly hidden text kept and flagged: {string.Join(", ", flagged)} character(s)");
+        return (notes, signals.Count > 0 ? signals : null);
+    }
+
+    /// <summary>
+    /// How visible one glyph is. Invisible render modes (3 Neither, 7 NeitherClip) are the text
+    /// layer of a searchable scan when an image lies beneath the glyph, and are kept as such;
+    /// with no image beneath they are removed. White or near-white fill, a size below 1pt and a
+    /// position outside the crop box are flagged only: a white heading on a coloured bar is
+    /// ordinary, and the colour of the background is not known here.
+    /// </summary>
+    internal static GlyphClass ClassifyGlyph(Letter letter, PdfRectangle visibleArea, IReadOnlyList<PdfRectangle> images)
+    {
         var box = letter.BoundingBox;
+        if (letter.RenderingMode is TextRenderingMode.Neither or TextRenderingMode.NeitherClip)
+            return images.Any(image => Covers(image, box)) ? GlyphClass.OcrLayer : GlyphClass.Removed;
+        if (string.IsNullOrWhiteSpace(letter.Value)) return GlyphClass.Visible;
         if (box.Right < visibleArea.Left || box.Left > visibleArea.Right || box.Top < visibleArea.Bottom || box.Bottom > visibleArea.Top)
-            return true;
+            return GlyphClass.OffPage;
+        if (letter.PointSize is > 0 and < 1) return GlyphClass.Tiny;
         var fills = letter.RenderingMode is TextRenderingMode.Fill or TextRenderingMode.FillClip;
         if (fills && letter.FillColor is { } color)
         {
             var (r, g, b) = color.ToRGBValues();
-            if (r > 0.98 && g > 0.98 && b > 0.98) return true;
+            if (r >= 0.95 && g >= 0.95 && b >= 0.95) return GlyphClass.White;
         }
-        return false;
+        return GlyphClass.Visible;
     }
 
-    /// <summary>The page in reading order; when glyphs are hidden, rebuilt from visible ones only.</summary>
-    private static (string Text, int Hidden) PageText(Page page)
+    /// <summary>The image covers the glyph's centre (with a point of slack for OCR alignment).</summary>
+    private static bool Covers(PdfRectangle image, PdfRectangle glyph)
+    {
+        double x = (glyph.Left + glyph.Right) / 2, y = (glyph.Bottom + glyph.Top) / 2;
+        return x >= image.Left - 1 && x <= image.Right + 1 && y >= image.Bottom - 1 && y <= image.Top + 1;
+    }
+
+    /// <summary>Bounds of the page's images, read only when the page has invisible text.</summary>
+    private static IReadOnlyList<PdfRectangle> ImageBounds(Page page)
+    {
+        if (page.NumberOfImages == 0) return [];
+        try { return page.GetImages().Select(image => image.BoundingBox).ToList(); }
+        catch (Exception ex) when (ex is not (OutOfMemoryException or OperationCanceledException or PdfLimitExceededException))
+        {
+            // Unreadable image descriptions: fall back to "the page has images".
+            return [page.CropBox.Bounds];
+        }
+    }
+
+    /// <summary>
+    /// The page text in content-stream order (PdfPig's <see cref="ContentOrderTextExtractor"/>);
+    /// when invisible glyphs are removed, the same algorithm runs over the kept glyphs, so the
+    /// reading order never changes.
+    /// </summary>
+    private static (string Text, PdfGlyphCounts Counts) PageText(Page page)
     {
         var area = page.CropBox.Bounds;
         var letters = page.Letters;
-        var visible = letters.Where(letter => !IsHiddenGlyph(letter, area)).ToList();
-        var hidden = letters.Count - visible.Count;
-        if (hidden == 0)
+        IReadOnlyList<PdfRectangle>? images = null;
+        int removed = 0, ocr = 0, white = 0, tiny = 0, offPage = 0;
+        var kept = new List<Letter>(letters.Count);
+        foreach (var letter in letters)
         {
-            try { return (ContentOrderTextExtractor.GetText(page), 0); }
-            catch (Exception ex) when (ex is not (OutOfMemoryException or OperationCanceledException or PdfLimitExceededException))
-            { return (page.Text, 0); }
+            if (letter.RenderingMode is TextRenderingMode.Neither or TextRenderingMode.NeitherClip) images ??= ImageBounds(page);
+            switch (ClassifyGlyph(letter, area, images ?? []))
+            {
+                case GlyphClass.Removed: removed++; continue;
+                case GlyphClass.OcrLayer: ocr++; break;
+                case GlyphClass.White: white++; break;
+                case GlyphClass.Tiny: tiny++; break;
+                case GlyphClass.OffPage: offPage++; break;
+            }
+            kept.Add(letter);
         }
-        var lines = NearestNeighbourWordExtractor.Instance.GetWords(visible)
-            .Where(word => !string.IsNullOrWhiteSpace(word.Text))
-            .GroupBy(word => Math.Round(word.BoundingBox.Bottom / 3.0))
-            .OrderByDescending(line => line.Key)
-            .Select(line => string.Join(' ', line.OrderBy(word => word.BoundingBox.Left).Select(word => word.Text)));
-        return (string.Join('\n', lines), hidden);
+        var counts = new PdfGlyphCounts(removed, ocr, white, tiny, offPage);
+        if (removed == 0)
+        {
+            try { return (ContentOrderTextExtractor.GetText(page), counts); }
+            catch (Exception ex) when (ex is not (OutOfMemoryException or OperationCanceledException or PdfLimitExceededException))
+            { return (page.Text, counts); }
+        }
+        return (ContentOrderText(kept), counts);
+    }
+
+    /// <summary>
+    /// <see cref="ContentOrderTextExtractor.GetText(Page, bool)"/> (PdfPig 0.1.16, default options)
+    /// over a subset of the page's letters, still in content-stream order.
+    /// </summary>
+    internal static string ContentOrderText(IReadOnlyList<Letter> letters)
+    {
+        var sb = new StringBuilder();
+        Letter? previous = null;
+        Letter? nonWhitespacePrevious = null;
+        var hasJustAddedWhitespace = false;
+        foreach (var letter in letters)
+        {
+            if (string.IsNullOrEmpty(letter.Value)) continue;
+            if (letter.Value == " " && !hasJustAddedWhitespace)
+            {
+                if (previous != null && IsNewline(previous, letter)) continue;
+                sb.Append(' ');
+                previous = letter;
+                hasJustAddedWhitespace = true;
+                continue;
+            }
+            hasJustAddedWhitespace = false;
+            if (previous != null && letter.Value != " ")
+            {
+                if (nonWhitespacePrevious != null && IsNewline(nonWhitespacePrevious, letter))
+                {
+                    if (previous.Value == " ") sb.Remove(sb.Length - 1, 1);
+                    sb.AppendLine();
+                    hasJustAddedWhitespace = true;
+                }
+                else if (previous.Value != " ")
+                {
+                    var gap = letter.StartBaseLine.X - previous.EndBaseLine.X;
+                    if (UglyToad.PdfPig.Util.WhitespaceSizeStatistics.IsProbablyWhitespace(gap, previous))
+                    {
+                        sb.Append(' ');
+                        hasJustAddedWhitespace = true;
+                    }
+                }
+            }
+            sb.Append(letter.Value);
+            previous = letter;
+            if (!string.IsNullOrWhiteSpace(letter.Value)) nonWhitespacePrevious = letter;
+        }
+        return sb.ToString();
+
+        static bool IsNewline(Letter previous, Letter letter)
+        {
+            var minPtSize = Math.Min((int)Math.Round(letter.PointSize), (int)Math.Round(previous.PointSize));
+            return Math.Abs(previous.StartBaseLine.Y - letter.StartBaseLine.Y) > minPtSize * 0.9;
+        }
     }
 
     private static ExtractedAttachment Rfc822(byte[] bytes, string kind)

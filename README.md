@@ -77,8 +77,12 @@ They follow the same caller policy as `/messages`.
     (CCITT, JBIG2) are refused, since text extraction never needs them. Per document, filters may produce at most 32 MB
     and the extraction thread may allocate at most 512 MB. At most 2 extractions and 2 downloads run at once,
     process-wide. Extraction runs off the request thread and stops when the request is aborted.
-  - **Hidden PDF text:** glyphs drawn invisibly (render mode 3/7), in white, below 1pt, or outside the crop box are
-    removed, and `detail` reports how many.
+  - **Hidden PDF text:** invisible glyphs (render mode 3/7) with no image beneath them are removed. Over an image
+    they are the text layer of a searchable scan and are kept. White or near-white, sub-1pt and off-page glyphs are
+    kept and flagged: white headings on coloured bars are ordinary in statements, and the background colour is not
+    known. `detail` gives the counts and `signals[]` the kinds (`pdf_invisible_text_removed`, `pdf_white_text`,
+    `pdf_tiny_text`, `pdf_off_page_text`). Text always keeps the content-stream order of PdfPig's
+    `ContentOrderTextExtractor`; when glyphs are removed, the same algorithm runs over the kept ones.
   - **Text:** capped at 20 000 characters, with `truncated`.
 - **Nothing is executed, rendered, or opened by an external program.** Bytes and text exist only in memory for the
   request and are cleared afterwards; nothing is written to records, entities, or disk.
