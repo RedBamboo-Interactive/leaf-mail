@@ -36,7 +36,7 @@ internal sealed class MemoryEntities : IEntityStore
     }
 
     public Task<LeafEntity> CreateAsync(string typeSlug, string name, JsonObject? data = null, CancellationToken ct = default)
-        => Task.FromResult(Put(new LeafEntity(Guid.NewGuid(), typeSlug, Guid.NewGuid().ToString("N"), name,
+        => Task.FromResult(Store(new LeafEntity(Guid.NewGuid(), typeSlug, Guid.NewGuid().ToString("N"), name,
             data?.DeepClone() as JsonObject ?? [], DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, null)));
 
     public Task<LeafEntity> UpsertBySlugAsync(string typeSlug, string slug, string name, JsonObject? data = null, CancellationToken ct = default)
@@ -45,7 +45,7 @@ internal sealed class MemoryEntities : IEntityStore
         var existing = _items.Values.FirstOrDefault(e => e.TypeSlug == typeSlug && e.Slug == slug);
         var entity = new LeafEntity(existing?.Id ?? Guid.NewGuid(), typeSlug, slug, name,
             data?.DeepClone() as JsonObject ?? [], existing?.CreatedAt ?? DateTimeOffset.UtcNow, Next(existing?.UpdatedAt), null);
-        return Task.FromResult(Put(entity));
+        return Task.FromResult(Store(entity));
     }
 
     /// <summary>When set, writes behave like the kernel's plugin-scoped store for this plugin entity.</summary>
@@ -60,7 +60,7 @@ internal sealed class MemoryEntities : IEntityStore
         if (FailWrite?.Invoke(existing.TypeSlug, dataPatch) is { } failure) throw failure;
         var data = existing.Data.DeepClone().AsObject();
         foreach (var (key, value) in dataPatch) data[key] = value?.DeepClone();
-        return Task.FromResult(Put(existing with { Data = data, Name = name ?? existing.Name, UpdatedAt = Next(existing.UpdatedAt) }));
+        return Task.FromResult(Store(existing with { Data = data, Name = name ?? existing.Name, UpdatedAt = Next(existing.UpdatedAt) }));
     }
 
     public int CompareExchangeCount;
@@ -75,7 +75,7 @@ internal sealed class MemoryEntities : IEntityStore
             CompareExchangeCount++;
             var entity = new LeafEntity(existing?.Id ?? Guid.NewGuid(), typeSlug, slug, name, data.DeepClone().AsObject(),
                 existing?.CreatedAt ?? DateTimeOffset.UtcNow, Next(existing?.UpdatedAt), null);
-            return Task.FromResult<LeafEntity?>(Put(entity));
+            return Task.FromResult<LeafEntity?>(Store(entity));
         }
     }
 
@@ -89,7 +89,7 @@ internal sealed class MemoryEntities : IEntityStore
     public Func<string, JsonObject, Exception?>? FailWrite;
 
     public Task<LeafEntity> ReplaceDataAsync(Guid id, JsonObject data, string? name = null, CancellationToken ct = default)
-        => Task.FromResult(Put(_items[id] with { Data = data.DeepClone().AsObject() }));
+        => Task.FromResult(Store(_items[id] with { Data = data.DeepClone().AsObject() }));
 
     public Task DeleteAsync(Guid id, CancellationToken ct = default)
     {
@@ -102,6 +102,21 @@ internal sealed class MemoryEntities : IEntityStore
 
     public LeafEntity Add(string type, string slug, JsonObject data)
         => Put(new LeafEntity(Guid.NewGuid(), type, slug, slug, data, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, null));
+
+    /// <summary>
+    /// A write through the store, refused as the kernel's plugin store refuses it: confidential data
+    /// naming an owning agent but no owner, which nobody could read. Owner-only and sealed (neither
+    /// owner) data pass.
+    /// </summary>
+    private LeafEntity Store(LeafEntity entity)
+    {
+        var data = entity.Data;
+        if (data["confidential"] is JsonValue flag && flag.TryGetValue<bool>(out var confidential) && confidential
+            && string.IsNullOrWhiteSpace(MailData.String(data, "owner_id") ?? MailData.String(data, "user_id"))
+            && !string.IsNullOrWhiteSpace(MailData.String(data, "owner_agent_id") ?? MailData.String(data, "agent")))
+            throw new InvalidOperationException($"A confidential entity needs owner_id ('{entity.Slug}' names an agent only)");
+        return Put(entity);
+    }
 
     private LeafEntity Put(LeafEntity entity)
     {
