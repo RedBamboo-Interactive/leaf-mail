@@ -1,0 +1,63 @@
+{
+  "schema": "leaf.extension-guide-locale/1",
+  "lang": "fr",
+  "tagline": "Laisse ton Agent lire ton Gmail pour chercher, résumer et retrouver des choses. Il n'envoie jamais rien.",
+  "summary": "Mail connecte un compte Gmail en lecture seule. Ton Agent peut chercher dans tes mails et lire des messages, des fils et certaines pièces jointes quand tu le demandes. Il ne peut ni envoyer, ni répondre, ni supprimer, ni classer : Leaf demande seulement à Google le droit de lire. Ce n'est pas une appli de mail et elle n'ajoute aucune boîte de réception.",
+  "whatYouGet": [
+    "Aucun nouvel écran. Ton Agent gagne le pouvoir de chercher et de lire ton Gmail.",
+    "Une page Mail dans les réglages pour connecter ton compte.",
+    "Ton Agent sait si le mail est connecté et combien de messages non lus tu as, jamais leur contenu.",
+    "Option : des avis de nouveaux mails (expéditeur et objet) dans LIVE, désactivés par défaut."
+  ],
+  "privacy": "Le mail est lu en direct sur Gmail quand tu le demandes et n'est pas enregistré. Seuls les identifiants, étiquettes et dates sont gardés 30 jours. Ce que ton Agent lit part vers son fournisseur d'IA. Tes identifiants de connexion sont chiffrés sur ce PC.",
+  "cost": { "note": "Tu utilises ton propre projet Google Cloud pour te connecter." },
+  "limitations": [
+    "Lecture seule : ton Agent ne peut ni envoyer, ni répondre, ni supprimer, ni étiqueter, ni déplacer.",
+    "Un seul compte Gmail, et un seul Agent autorisé à le lire.",
+    "Les longs messages sont coupés à environ 20 000 caractères.",
+    "Pièces jointes : PDF, texte, CSV, pages web, invitations de calendrier et mails joints. Les images et scans ne sont pas lus.",
+    "Toute personne qui peut parler à l'Agent choisi pourrait lui demander de lire tes mails, y compris dans des espaces Discord partagés."
+  ],
+  "requirements": {
+    "gmail": { "label": "Un compte Gmail" },
+    "google-project": { "label": "Ton propre projet Google Cloud", "detail": "Avec l'API Gmail activée. Une courte mise en place unique, guidée dans les réglages Mail." },
+    "client-json": { "label": "Un fichier client Desktop app (JSON)", "detail": "Téléchargé depuis ton projet Google Cloud. Les clients Web sont refusés." },
+    "sentinel": { "label": "Sentinel (le contrôle de sécurité)", "detail": "Sans lui, aucun contenu de mail n'est renvoyé à ton Agent." }
+  },
+  "setup": {
+    "project": { "title": "Crée ton projet Google", "body": "Dans Google Cloud Console, crée un projet et active l'API Gmail. Remplis la page Branding (nom de l'appli, e-mail d'assistance, liens page d'accueil et politique de confidentialité)." },
+    "publish": { "title": "Publie-le en appli externe", "body": "Mets l'audience sur External et publie l'appli (In production). Laisse Data Access vide. Si tu restes en mode Testing, Google te déconnecte après 7 jours." },
+    "client": { "title": "Télécharge un client Desktop", "body": "Dans Clients, crée un client de type Desktop app et télécharge son fichier JSON." },
+    "upload": { "title": "Envoie-le dans Settings, Mail", "body": "Ouvre Settings, Mail, choisis Upload JSON et sélectionne le fichier que tu viens de télécharger." },
+    "pick-agent": { "title": "Choisis quel Agent peut lire tes mails", "body": "À l'étape Agent, choisis l'unique Agent autorisé à utiliser ton Gmail. Ce choix lui donne aussi les consignes pour utiliser Mail." },
+    "connect": { "title": "Connecte ton Gmail", "body": "Clique sur Connect et garde l'onglet ouvert. Google prévient qu'il n'a pas vérifié l'appli : choisis Advanced, continue, puis autorise la lecture. Attends Connected." }
+  },
+  "useCases": {
+    "find-document": {
+      "title": "Retrouve ce fameux mail",
+      "story": "Tu te souviens d'un mail sur l'entretien de ta chaudière mais pas de l'expéditeur. Ton Agent cherche dans Gmail et te donne la date et l'expéditeur.",
+      "try": "Cherche dans mon Gmail le mail sur l'entretien de la chaudière et dis-moi la date et qui l'a envoyé."
+    },
+    "summarize-thread": {
+      "title": "Rattrape un long fil de discussion",
+      "story": "Ta conversation avec ton propriétaire compte vingt réponses. Ton Agent la lit et te donne la version courte.",
+      "try": "Lis mon dernier fil de mails avec le propriétaire et résume ce qui a été décidé et ce qui reste ouvert."
+    },
+    "read-receipt": {
+      "title": "Lis un reçu ou une réservation",
+      "story": "Il te faut le total d'une facture PDF ou l'heure d'une réservation. Ton Agent lit le texte de la pièce jointe pour toi.",
+      "try": "Retrouve la facture de mon fournisseur internet ce mois-ci et dis-moi le montant."
+    },
+    "new-mail-notices": {
+      "title": "Vois les nouveaux mails dans LIVE",
+      "story": "Si tu l'actives, les nouveaux mails de ta boîte de réception montrent leur expéditeur et leur objet dans ta chronologie LIVE, sans le contenu.",
+      "try": "Est-ce que j'ai reçu du nouveau dans mes mails aujourd'hui ? Dis-moi juste de qui."
+    }
+  },
+  "troubleshooting": {
+    "needs-reconnect": { "symptom": "Mail indique qu'il faut se reconnecter", "fix": "Google n'accepte plus la connexion enregistrée. Ouvre Settings, Mail et clique sur Reconnect. En mode Testing, Google la fait expirer après 7 jours, donc publie l'appli." },
+    "unverified-warning": { "symptom": "Google dit qu'il n'a pas vérifié cette appli", "fix": "C'est normal pour ton propre projet. Choisis Advanced, continue vers ton appli, puis autorise la lecture." },
+    "no-content": { "symptom": "Ton Agent n'obtient aucun contenu de mail", "fix": "Le contrôle de sécurité est peut-être éteint. Vérifie que l'extension Sentinel est installée et activée. Sans elle, aucun mail n'est renvoyé." },
+    "web-client-refused": { "symptom": "Le fichier client est refusé", "fix": "Le fichier doit venir d'un client de type Desktop app. Crée un nouveau client de ce type et renvoie son JSON." }
+  }
+}

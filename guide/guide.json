@@ -1,0 +1,116 @@
+{
+  "schema": "leaf.extension-guide/1",
+  "id": "mail",
+  "kind": "integration",
+  "category": "communication",
+  "tagline": "Let your Agent read your Gmail to search, summarize and find things. It never sends.",
+  "summary": "Mail connects one Gmail account in read-only mode. Your Agent can search your mail and read messages, threads and some attachments when you ask. It cannot send, reply, delete, label or change anything: Leaf only asks Google for permission to read. It is not a mail app and adds no inbox screen.",
+  "whatYouGet": [
+    "No new screen. Your Agent gains the power to search and read your Gmail.",
+    "A Mail page in Settings to connect your account.",
+    "Your Agent knows if mail is connected and how many unread messages you have, never their content.",
+    "Optional notices of new mail (sender and subject) in LIVE, off by default."
+  ],
+  "runsWhere": "hybrid",
+  "cost": { "kind": "free", "note": "You use your own Google Cloud project to connect." },
+  "privacy": "Mail is read live from Gmail when you ask and is not saved. Only message ids, labels and dates are kept for 30 days. Content your Agent reads goes to its AI provider. Your sign-in details are encrypted on this PC.",
+  "requirements": [
+    { "id": "gmail", "kind": "account", "label": "A Gmail account" },
+    { "id": "google-project", "kind": "account", "label": "Your own Google Cloud project", "detail": "With the Gmail API enabled. A short one-time setup guided in the Mail settings." },
+    { "id": "client-json", "kind": "api-key", "label": "A Desktop app client file (JSON)", "detail": "Downloaded from your Google Cloud project. Web clients are refused." },
+    { "id": "sentinel", "kind": "extension", "label": "Sentinel (the safety check)", "detail": "Without it, no mail content is returned to your Agent.", "check": "extension:cap-sentinel" }
+  ],
+  "setup": [
+    {
+      "id": "project",
+      "title": "Create your Google project",
+      "body": "In Google Cloud Console, create a project and enable the Gmail API. Fill in the Branding page (app name, support email, home page and privacy policy links)."
+    },
+    {
+      "id": "publish",
+      "title": "Publish it as an external app",
+      "body": "Set the audience to External and publish the app (In production). Leave Data Access empty. If you stay in Testing mode, Google disconnects you after 7 days."
+    },
+    {
+      "id": "client",
+      "title": "Download a Desktop client",
+      "body": "Under Clients, create a client of type Desktop app and download its JSON file."
+    },
+    {
+      "id": "upload",
+      "title": "Upload it in Settings, Mail",
+      "body": "Open Settings, Mail, choose Upload JSON and pick the file you just downloaded."
+    },
+    {
+      "id": "pick-agent",
+      "title": "Choose which Agent can read your mail",
+      "body": "In the Agent step, pick the one Agent that is allowed to use your Gmail. Choosing it also gives that Agent the instructions for using Mail."
+    },
+    {
+      "id": "connect",
+      "title": "Connect your Gmail",
+      "body": "Click Connect and keep the tab open. Google warns that it has not verified the app: choose Advanced, continue, then allow read access. Wait for Connected."
+    }
+  ],
+  "useCases": [
+    {
+      "id": "find-document",
+      "title": "Find that one email",
+      "story": "You remember an email about your boiler service but not who sent it. Your Agent searches Gmail and tells you the date and sender.",
+      "try": "Search my Gmail for the email about the boiler service and tell me the date and who sent it."
+    },
+    {
+      "id": "summarize-thread",
+      "title": "Catch up on a long thread",
+      "story": "A conversation with your landlord has grown to twenty replies. Your Agent reads it and gives you the short version.",
+      "try": "Read my latest email thread with the landlord and summarize what was agreed and what is still open."
+    },
+    {
+      "id": "read-receipt",
+      "title": "Read a receipt or booking",
+      "story": "You need the total from a PDF invoice or the time of a booking. Your Agent reads the attachment text for you.",
+      "try": "Find the invoice from my internet provider this month and tell me the amount."
+    },
+    {
+      "id": "new-mail-notices",
+      "title": "See new mail in LIVE",
+      "story": "If you turn it on, new Inbox mail shows its sender and subject in your LIVE timeline, without the body.",
+      "try": "Have I received anything new in my mail today? Just tell me who it is from."
+    }
+  ],
+  "limitations": [
+    "Read-only: your Agent cannot send, reply, delete, label or move mail.",
+    "One Gmail account, and one Agent allowed to read it.",
+    "Long messages are cut at about 20,000 characters.",
+    "Attachments: PDF, text, CSV, web pages, calendar invites and attached emails. Images and scans are not read.",
+    "Anyone who can talk to the chosen Agent could ask it to read your mail, including in shared Discord spaces."
+  ],
+  "troubleshooting": [
+    {
+      "id": "needs-reconnect",
+      "symptom": "Mail says it needs reconnecting",
+      "fix": "Google stopped accepting the saved sign-in. Open Settings, Mail and click Reconnect. In Testing mode Google expires it after 7 days, so publish the app."
+    },
+    {
+      "id": "unverified-warning",
+      "symptom": "Google says it has not verified this app",
+      "fix": "This is expected for your own project. Choose Advanced, continue to your app, then allow read access."
+    },
+    {
+      "id": "no-content",
+      "symptom": "Your Agent cannot get any mail content",
+      "fix": "The safety check may be off. Make sure the Sentinel extension is installed and on. No mail is returned without it.",
+      "check": "extension:cap-sentinel"
+    },
+    {
+      "id": "web-client-refused",
+      "symptom": "The client file is rejected",
+      "fix": "The file must come from a Desktop app client. Create a new client of that type and upload its JSON again."
+    }
+  ],
+  "agent": {
+    "whenToSuggest": "When the user wants their Agent to search, read or summarize their Gmail, find a receipt or booking, or be told about new mail, and is fine with read-only access.",
+    "skill": "mail",
+    "discover": "/api/extensions/mail/discover"
+  }
+}
