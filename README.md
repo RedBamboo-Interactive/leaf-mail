@@ -307,7 +307,9 @@ into scratch, and never ships kernel assemblies.
 ## Release
 
 Release Manager builds Mail with the shared extension recipe from `release/producer-input.v1.json` and
-`scripts/release/metadata.mjs`. The plugin, the Extractor and the tests each commit a `packages.lock.json`, and the
+`scripts/release/metadata.mjs`. The producer input names Leaf.Sdk and the RedBamboo packages without committing
+their commits: the builder passes the RedLeaf and redbamboo-packages commits it resolved (`--redleaf-commit`,
+`--redbamboo-commit`), and the metadata records exactly those. The plugin, the Extractor and the tests each commit a `packages.lock.json`, and the
 recipe restores them with `--locked-mode`. After a dependency change, run a plain `dotnet restore` and commit the
 updated lock files. `metadata.mjs` pins the manifest's permissions and slots, so a permission change must be made in
 both files. It also refuses a release if a credential-shaped file (an OAuth client JSON, token or key file, a mail
