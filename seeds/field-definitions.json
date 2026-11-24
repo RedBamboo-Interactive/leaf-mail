@@ -11,7 +11,7 @@
 
   { "parentType": "mail-account", "slug": "email", "name": "Email", "fieldType": "string", "sortOrder": 0, "description": "Mailbox address reported by Gmail after consent." },
   { "parentType": "mail-account", "slug": "status", "name": "Status", "fieldType": "select", "sortOrder": 1, "constraints": "{\"options\":[\"connected\",\"needs_reauth\",\"disconnected\"]}" },
-  { "parentType": "mail-account", "slug": "refresh_token", "name": "Refresh Token", "fieldType": "secret", "sortOrder": 2, "description": "Google OAuth refresh token (gmail.readonly). Encrypted, never returned over HTTP, never logged." },
+  { "parentType": "mail-account", "slug": "refresh_token", "name": "Refresh Token", "fieldType": "secret", "sortOrder": 2, "description": "Google OAuth refresh token (gmail.readonly). Encrypted, never returned over HTTP, never logged.", "displayHints": "{\"secretConnection\": true}" },
   { "parentType": "mail-account", "slug": "granted_scope", "name": "Granted Scope", "fieldType": "string", "sortOrder": 3 },
   { "parentType": "mail-account", "slug": "history_id", "name": "History ID", "fieldType": "string", "sortOrder": 4, "description": "Gmail history cursor for incremental sync." },
   { "parentType": "mail-account", "slug": "backfill_complete", "name": "Backfill Complete", "fieldType": "boolean", "sortOrder": 5 },
